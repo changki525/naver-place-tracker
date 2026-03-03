@@ -129,27 +129,40 @@ const server = createServer(async (req, res) => {
       const results = [];
 
       for (const keyword of keywords) {
-        const crawlResults = await crawlNaverPlace(keyword, { maxRank, lng, lat });
-        const rankResult = parseRankFromResults(crawlResults, placeId, placeName);
-        const prevRank = getPreviousRank(history, placeId, keyword);
+        try {
+          const crawlResults = await crawlNaverPlace(keyword, { maxRank, lng, lat });
+          const rankResult = parseRankFromResults(crawlResults, placeId, placeName);
+          const prevRank = getPreviousRank(history, placeId, keyword);
 
-        await saveResult(
-          placeId,
-          rankResult.placeName || placeName || placeId,
-          placeUrl,
-          keyword,
-          rankResult
-        );
+          await saveResult(
+            placeId,
+            rankResult.placeName || placeName || placeId,
+            placeUrl,
+            keyword,
+            rankResult
+          );
 
-        results.push({
-          keyword,
-          found: rankResult.found,
-          rank: rankResult.rank,
-          previousRank: prevRank,
-          placeName: rankResult.placeName || placeName,
-          matchedBy: rankResult.matchedBy,
-          totalResults: rankResult.totalResults,
-        });
+          results.push({
+            keyword,
+            found: rankResult.found,
+            rank: rankResult.rank,
+            previousRank: prevRank,
+            placeName: rankResult.placeName || placeName,
+            matchedBy: rankResult.matchedBy,
+            totalResults: rankResult.totalResults,
+          });
+        } catch (kwErr) {
+          results.push({
+            keyword,
+            found: false,
+            rank: null,
+            previousRank: null,
+            placeName: placeName,
+            matchedBy: null,
+            totalResults: 0,
+            error: kwErr.message,
+          });
+        }
       }
 
       sendJson(res, 200, { placeId, placeName, results });

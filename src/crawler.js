@@ -22,7 +22,11 @@ let _closeTimer = null;
 const IDLE_TIMEOUT = 60_000; // 60초 미사용 시 자동 종료
 
 async function getBrowser(headless = true) {
-  if (_browser && _browser.isConnected()) {
+  // 기존 브라우저가 연결 해제되었으면 정리
+  if (_browser && !_browser.isConnected()) {
+    _browser = null;
+  }
+  if (_browser) {
     resetCloseTimer();
     return _browser;
   }
@@ -34,6 +38,8 @@ async function getBrowser(headless = true) {
       '--disable-dev-shm-usage',
       '--disable-gpu',
       '--disable-extensions',
+      '--disable-background-timer-throttling',
+      '--disable-renderer-backgrounding',
     ],
   });
   _browser.on('disconnected', () => { _browser = null; });
@@ -184,13 +190,22 @@ export async function crawlNaverPlace(keyword, options = {}) {
     } catch (err) {
       // 컨텍스트 정리
       if (context) await context.close().catch(() => {});
-      // 브라우저 크래시 → 싱글턴 리셋 후 재시도
+      // 브라우저 크래시 → 싱글턴 완전 종료 후 재시도
       const msg = err.message || '';
       if (msg.includes('closed') || msg.includes('crashed') || msg.includes('disconnected')) {
-        _browser = null;
-        if (retry === 0) continue; // 1회 재시도
+        if (_browser) {
+          await _browser.close().catch(() => {});
+          _browser = null;
+        }
+        if (retry === 0) {
+          // 재시도 전 잠시 대기 (브라우저 리소스 해제)
+          await new Promise(r => setTimeout(r, 1000));
+          continue;
+        }
       }
-      throw err;
+      // 재시도 실패 시에도 throw 대신 빈 배열 반환 (다음 키워드 진행 가능)
+      console.error(`[crawl] ${keyword} 실패 (retry=${retry}):`, msg);
+      return [];
     }
   }
   return [];
@@ -529,11 +544,15 @@ export async function fetchPlaceCoords(placeId, placeName) {
  */
 export async function resolveRedirectUrl(shortUrl) {
   const browser = await getBrowser(true);
-  const page = await browser.newPage();
+  const context = await browser.newContext({ userAgent: DEFAULT_UA });
   try {
+    const page = await context.newPage();
     await page.goto(shortUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    return page.url();
-  } finally {
-    await page.close();
+    const finalUrl = page.url();
+    await context.close().catch(() => {});
+    return finalUrl;
+  } catch (err) {
+    await context.close().catch(() => {});
+    throw err;
   }
 }
