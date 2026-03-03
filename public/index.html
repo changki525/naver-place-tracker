@@ -454,6 +454,7 @@
     if (!fav) return;
 
     document.getElementById('placeUrl').value = fav.url;
+    lastPlaceUrl = fav.url;
     keywordList.length = 0;
     keywordList.push(...fav.keywords);
     renderTags();
@@ -616,6 +617,17 @@
       keywordList.pop();
       renderTags();
     }
+  });
+
+  // URL 변경 시 키워드 리셋
+  let lastPlaceUrl = '';
+  document.getElementById('placeUrl').addEventListener('input', e => {
+    const val = e.target.value.trim();
+    if (lastPlaceUrl && val !== lastPlaceUrl && keywordList.length > 0) {
+      keywordList.length = 0;
+      renderTags();
+    }
+    lastPlaceUrl = val;
   });
 
   document.getElementById('placeUrl').addEventListener('keydown', e => {
