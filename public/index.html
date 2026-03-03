@@ -662,12 +662,15 @@
   });
 
   // ─── 순위 조회 (키워드별 개별 호출) ───
+  let lastCheckedPlaceId = null;
+
   async function runCheck() {
     const urlInput = document.getElementById('placeUrl').value.trim();
 
     if (!urlInput) { alert('Place URL 또는 ID를 입력해주세요.'); return; }
     if (keywordList.length === 0) { alert('키워드를 1개 이상 추가해주세요.'); return; }
 
+    lastCheckedPlaceId = null;
     const btn = document.getElementById('checkBtn');
     const liveSection = document.getElementById('liveResults');
     const liveCards = document.getElementById('liveCards');
@@ -748,6 +751,9 @@
 
           card.classList.add('done');
 
+          // placeId 저장
+          if (data.placeId) lastCheckedPlaceId = data.placeId;
+
           // 업체명 표시
           if (data.placeName && completed === 0) {
             liveTitle.innerHTML = `${esc(data.placeName)} <span style="font-weight:400;color:var(--text-dim)">순위 조회</span>`;
@@ -781,6 +787,11 @@
     // 즐겨찾기 업체명 자동 업데이트
     updateFavName(urlInput);
     renderFavorites();
+
+    // 조회한 업체의 순위 이력 자동 표시
+    if (lastCheckedPlaceId) {
+      showHistory(lastCheckedPlaceId);
+    }
   }
 
   function updateFavName(url) {
