@@ -8,7 +8,7 @@ import { readFile } from 'fs/promises';
 import { dirname, resolve, extname } from 'path';
 import { fileURLToPath } from 'url';
 
-import { crawlNaverPlace, fetchPlaceName, resolveRedirectUrl } from './src/crawler.js';
+import { crawlNaverPlace, fetchPlaceName, fetchPlaceCoords, resolveRedirectUrl } from './src/crawler.js';
 import { extractPlaceId, parseRankFromResults } from './src/parser.js';
 import { loadHistory, saveResult, getPreviousRank } from './src/history.js';
 
@@ -73,7 +73,7 @@ const server = createServer(async (req, res) => {
   if (path === '/api/check' && req.method === 'POST') {
     try {
       const body = await readBody(req);
-      const { url: placeUrl, keywords, maxRank = 50 } = body;
+      const { url: placeUrl, keywords, maxRank = 200 } = body;
 
       // 단축 URL(naver.me 등) 자동 리다이렉트 처리
       let resolvedUrl = placeUrl;
@@ -91,7 +91,22 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      // 업체명 조회 (이력에 있으면 브라우저 생략)
+      // URL에서 좌표 추출 (업체 위치 기반 검색용)
+      const lngMatch = resolvedUrl.match(/lng=([\d.]+)/);
+      const latMatch = resolvedUrl.match(/lat=([\d.]+)/);
+      let lng = lngMatch ? lngMatch[1] : null;
+      let lat = latMatch ? latMatch[1] : null;
+
+      // URL에 좌표가 없으면 ?c=lng,lat 형식도 시도
+      if (!lng) {
+        const cMatch = resolvedUrl.match(/[?&]c=([\d.]+),([\d.]+)/);
+        if (cMatch) {
+          lng = cMatch[1];
+          lat = cMatch[2];
+        }
+      }
+
+      // 업체명 조회 (좌표 추출에도 필요하므로 먼저 실행)
       const history = await loadHistory();
       let placeName = history.places?.[placeId]?.placeName || null;
       if (!placeName || placeName === placeId) {
@@ -99,10 +114,22 @@ const server = createServer(async (req, res) => {
           placeName = await fetchPlaceName(placeId);
         } catch { /* 무시 */ }
       }
+
+      // 여전히 좌표가 없으면 업체명으로 검색하여 좌표 추출
+      if (!lng && placeName) {
+        try {
+          const coords = await fetchPlaceCoords(placeId, placeName);
+          if (coords.lng && coords.lat) {
+            lng = coords.lng;
+            lat = coords.lat;
+          }
+        } catch { /* 좌표 없이 진행 */ }
+      }
+
       const results = [];
 
       for (const keyword of keywords) {
-        const crawlResults = await crawlNaverPlace(keyword, { maxRank });
+        const crawlResults = await crawlNaverPlace(keyword, { maxRank, lng, lat });
         const rankResult = parseRankFromResults(crawlResults, placeId, placeName);
         const prevRank = getPreviousRank(history, placeId, keyword);
 
