@@ -34,10 +34,9 @@ async function getBrowser(headless = true) {
       '--disable-dev-shm-usage',
       '--disable-gpu',
       '--disable-extensions',
-      '--single-process',
-      '--no-zygote',
     ],
   });
+  _browser.on('disconnected', () => { _browser = null; });
   resetCloseTimer();
   return _browser;
 }
