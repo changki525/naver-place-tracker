@@ -8,7 +8,7 @@ import { readFile } from 'fs/promises';
 import { dirname, resolve, extname } from 'path';
 import { fileURLToPath } from 'url';
 
-import { crawlNaverPlace, fetchPlaceName } from './src/crawler.js';
+import { crawlNaverPlace, fetchPlaceName, resolveRedirectUrl } from './src/crawler.js';
 import { extractPlaceId, parseRankFromResults } from './src/parser.js';
 import { loadHistory, saveResult, getPreviousRank } from './src/history.js';
 
@@ -75,7 +75,15 @@ const server = createServer(async (req, res) => {
       const body = await readBody(req);
       const { url: placeUrl, keywords, maxRank = 50 } = body;
 
-      let placeId = extractPlaceId(placeUrl);
+      // 단축 URL(naver.me 등) 자동 리다이렉트 처리
+      let resolvedUrl = placeUrl;
+      if (placeUrl.includes('naver.me') || placeUrl.includes('naver.com/j/')) {
+        try {
+          resolvedUrl = await resolveRedirectUrl(placeUrl);
+        } catch { /* 원본 URL 유지 */ }
+      }
+
+      let placeId = extractPlaceId(resolvedUrl);
       if (!placeId && /^\d+$/.test(placeUrl)) placeId = placeUrl;
 
       if (!placeId) {
