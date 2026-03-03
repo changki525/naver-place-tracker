@@ -153,6 +153,7 @@ const server = createServer(async (req, res) => {
             placeName: rankResult.placeName || placeName,
             matchedBy: rankResult.matchedBy,
             totalResults: rankResult.totalResults,
+            rankedList: crawlResults,
           });
         } catch (kwErr) {
           results.push({

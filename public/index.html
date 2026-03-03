@@ -467,6 +467,67 @@
     .badge-green { background: var(--green-light); color: #059669; }
     .badge-gray { background: var(--bg); color: var(--text-light); }
 
+    /* ─── 전체 순위 리스트 ─── */
+    .ranked-list-wrap {
+      overflow: hidden; max-height: 0;
+      transition: max-height 0.3s ease;
+    }
+    .ranked-list-wrap.open { max-height: 5000px; }
+    .ranked-list-toggle {
+      display: flex; align-items: center; gap: 6px;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 8px; padding: 8px 14px;
+      font-size: 12px; font-weight: 600; color: var(--text-sub);
+      cursor: pointer; transition: all 0.15s;
+      margin-top: 10px; width: 100%;
+    }
+    .ranked-list-toggle:hover { border-color: var(--green); color: var(--green); }
+    .ranked-list-toggle .toggle-arrow {
+      transition: transform 0.2s; display: inline-block;
+    }
+    .ranked-list-toggle.open .toggle-arrow { transform: rotate(180deg); }
+    .ranked-list-table {
+      width: 100%; border-collapse: collapse; margin-top: 8px;
+      font-size: 13px;
+    }
+    .ranked-list-table thead th {
+      text-align: left; padding: 8px 10px;
+      font-size: 11px; font-weight: 600; color: var(--text-light);
+      border-bottom: 2px solid var(--border); background: var(--bg);
+      position: sticky; top: 0; z-index: 1;
+    }
+    .ranked-list-table tbody td {
+      padding: 7px 10px; border-bottom: 1px solid var(--border-light);
+    }
+    .ranked-list-table tbody tr:hover { background: var(--bg); }
+    .ranked-list-table tbody tr.rl-highlight {
+      background: var(--green-light) !important;
+    }
+    .ranked-list-table tbody tr.rl-highlight td {
+      font-weight: 700; color: #059669;
+    }
+    .rl-rank-num {
+      font-weight: 800; min-width: 32px; display: inline-block; text-align: center;
+    }
+    .rl-rank-num.top1 { color: #d4a017; }
+    .rl-rank-num.top2 { color: #8a8a8a; }
+    .rl-rank-num.top3 { color: #cd7f32; }
+    .rl-my-badge {
+      background: var(--green); color: #fff;
+      font-size: 10px; font-weight: 700;
+      padding: 2px 6px; border-radius: 4px; margin-left: 6px;
+      white-space: nowrap;
+    }
+    .rl-scroll-box {
+      max-height: 400px; overflow-y: auto;
+      border: 1px solid var(--border); border-radius: 8px;
+      margin-top: 8px;
+    }
+    .rl-scroll-box::-webkit-scrollbar { width: 6px; }
+    .rl-scroll-box::-webkit-scrollbar-thumb {
+      background: var(--border); border-radius: 3px;
+    }
+
     /* ─── Responsive ─── */
     .sidebar-overlay {
       display: none; position: fixed; inset: 0;
@@ -904,13 +965,16 @@
     progressFill.style.width = '0%';
 
     liveCards.innerHTML = keywordList.map((kw, i) => `
-      <div class="result-row" id="kwCard${i}">
-        <div class="result-rank pending" id="kwRank${i}"><div class="mini-spinner"></div></div>
-        <div class="result-info">
-          <div class="result-keyword">${esc(kw)}</div>
-          <div class="result-meta" id="kwMeta${i}">대기 중...</div>
+      <div id="kwWrap${i}">
+        <div class="result-row" id="kwCard${i}">
+          <div class="result-rank pending" id="kwRank${i}"><div class="mini-spinner"></div></div>
+          <div class="result-info">
+            <div class="result-keyword">${esc(kw)}</div>
+            <div class="result-meta" id="kwMeta${i}">대기 중...</div>
+          </div>
+          <div id="kwChange${i}"></div>
         </div>
-        <div id="kwChange${i}"></div>
+        <div id="kwRankedList${i}"></div>
       </div>
     `).join('');
 
@@ -965,6 +1029,12 @@
           if (data.placeId) lastCheckedPlaceId = data.placeId;
           if (data.placeName && completed === 0) {
             liveTitle.innerHTML = `${esc(data.placeName)} <span style="font-weight:400;color:var(--text-light)">순위 조회</span>`;
+          }
+
+          // 전체 순위 리스트 렌더링
+          const rlWrap = document.getElementById(`kwRankedList${i}`);
+          if (r.rankedList && r.rankedList.length > 0) {
+            rlWrap.innerHTML = renderRankedList(r.rankedList, data.placeId, i);
           }
         }
       } catch (err) {
@@ -1381,6 +1451,53 @@
       } else { tooltip.classList.remove('show'); }
     };
     canvas.onmouseleave = () => tooltip.classList.remove('show');
+  }
+
+  // ─── 전체 순위 리스트 ───
+  function renderRankedList(list, targetPlaceId, idx) {
+    const count = list.length;
+    let rows = '';
+    for (const item of list) {
+      const isMe = targetPlaceId && item.placeId === targetPlaceId;
+      const rowClass = isMe ? 'rl-highlight' : '';
+      let rankClass = '';
+      if (item.rank === 1) rankClass = 'top1';
+      else if (item.rank === 2) rankClass = 'top2';
+      else if (item.rank === 3) rankClass = 'top3';
+
+      rows += `<tr class="${rowClass}">
+        <td><span class="rl-rank-num ${rankClass}">${item.rank}</span></td>
+        <td>${esc(item.placeName || '-')}${isMe ? '<span class="rl-my-badge">내 업체</span>' : ''}</td>
+        <td style="font-size:11px;color:var(--text-light);font-family:monospace">${item.placeId || '-'}</td>
+      </tr>`;
+    }
+
+    return `
+      <button class="ranked-list-toggle" onclick="toggleRankedList(${idx}, this)">
+        <span class="toggle-arrow">▼</span> 전체 순위 보기 (${count}개)
+      </button>
+      <div class="ranked-list-wrap" id="rlWrap${idx}">
+        <div class="rl-scroll-box">
+          <table class="ranked-list-table">
+            <thead><tr><th style="width:50px">#</th><th>업체명</th><th style="width:100px">Place ID</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
+  function toggleRankedList(idx, btn) {
+    const wrap = document.getElementById(`rlWrap${idx}`);
+    const isOpen = wrap.classList.toggle('open');
+    btn.classList.toggle('open', isOpen);
+
+    // 하이라이트된 행으로 자동 스크롤
+    if (isOpen) {
+      setTimeout(() => {
+        const hl = wrap.querySelector('.rl-highlight');
+        if (hl) hl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 150);
+    }
   }
 
   function esc(str) {
