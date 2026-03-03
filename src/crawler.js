@@ -26,7 +26,18 @@ async function getBrowser(headless = true) {
     resetCloseTimer();
     return _browser;
   }
-  _browser = await chromium.launch({ headless });
+  _browser = await chromium.launch({
+    headless,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-extensions',
+      '--single-process',
+      '--no-zygote',
+    ],
+  });
   resetCloseTimer();
   return _browser;
 }
