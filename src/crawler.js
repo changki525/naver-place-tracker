@@ -121,10 +121,13 @@ export async function crawlNaverPlace(keyword, options = {}) {
 
       // 현재 페이지 DOM + Apollo 수집
       const results = [];
+      let organicCount = 0;
       let currentPage = 1;
       const MAX_PAGES = 5;
+      const seenIds = new Set();
+      const seenNames = new Set();
 
-      while (results.length < maxRank && currentPage <= MAX_PAGES) {
+      while (organicCount < maxRank && currentPage <= MAX_PAGES) {
         // 스크롤하여 전체 DOM 로드
         await scrollToBottom(searchFrame);
 
@@ -136,17 +139,27 @@ export async function crawlNaverPlace(keyword, options = {}) {
         // DOM 기반 병합 (DOM 순서 유지, Apollo 누락분 삽입)
         const pageItems = mergeDomFirst(domItems, apolloItems);
 
+        // 광고는 maxRank 카운트에서 제외, 중복도 제거
         for (const item of pageItems) {
-          if (results.length >= maxRank) break;
+          if (organicCount >= maxRank) break;
+
+          // 중복 체크 (placeId 또는 이름 기준)
+          const idKey = item.placeId || null;
+          const nameKey = item.placeName;
+          if ((idKey && seenIds.has(idKey)) || seenNames.has(nameKey)) continue;
+          if (idKey) seenIds.add(idKey);
+          seenNames.add(nameKey);
+
           results.push({
             rank: results.length + 1,
             placeId: item.placeId || null,
             placeName: item.placeName,
             isAd: item.isAd,
           });
+          if (!item.isAd) organicCount++;
         }
 
-        if (results.length >= maxRank) break;
+        if (organicCount >= maxRank) break;
 
         const hasNext = await clickNextPage(searchFrame, currentPage + 1);
         if (!hasNext) break;
@@ -277,8 +290,9 @@ async function collectApolloItems(frame) {
       const rq = apollo['ROOT_QUERY'];
       if (!rq) return [];
 
+      // 모든 카테고리 지원: restaurantList, cafeList, placeList, beautyList 등
       const listKey = Object.keys(rq).find(
-        k => k.includes('restaurantList') && !k.includes('Filter') &&
+        k => k.includes('List') && !k.includes('Filter') && !k.includes('__typename') &&
              (k.includes('"display":70') || k.includes('"display":50'))
       );
       if (!listKey) return [];
@@ -400,34 +414,39 @@ async function clickNextPage(frame, pageNum) {
 
 /**
  * Place ID로 업체명을 가져온다.
- * HTTP를 먼저 시도, 실패 시 Playwright 폴백.
+ * 여러 카테고리 타입을 시도하고, 실패 시 Playwright 폴백.
  */
 export async function fetchPlaceName(placeId) {
-  // 1차: HTTP
-  try {
-    const res = await fetch(`https://pcmap.place.naver.com/restaurant/${placeId}/home`, {
-      headers: {
-        'User-Agent': DEFAULT_UA,
-        'Accept': 'text/html',
-        'Accept-Language': 'ko-KR,ko;q=0.9',
-      },
-    });
-    if (res.ok) {
+  const PLACE_TYPES = ['restaurant', 'cafe', 'place', 'hairshop', 'hospital', 'accommodation'];
+
+  // 1차: HTTP — 여러 카테고리 타입 시도
+  for (const type of PLACE_TYPES) {
+    try {
+      const res = await fetch(`https://pcmap.place.naver.com/${type}/${placeId}/home`, {
+        headers: {
+          'User-Agent': DEFAULT_UA,
+          'Accept': 'text/html',
+          'Accept-Language': 'ko-KR,ko;q=0.9',
+        },
+      });
+      if (!res.ok) continue;
       const html = await res.text();
+      if (html.includes('찾을 수 없습니다')) continue;
+
       const ogMatch = html.match(/<meta\s+property="og:title"\s+content="([^"]+)"/);
       if (ogMatch) {
-        const parts = ogMatch[1].split(':');
-        if (parts[0]?.trim()) return parts[0].trim();
+        const name = ogMatch[1].split(':')[0]?.trim();
+        if (name && !name.includes('네이버') && !name.includes('플레이스')) return name;
       }
       const titleMatch = html.match(/<title>([^<]+)<\/title>/);
       if (titleMatch) {
-        const parts = titleMatch[1].split(':');
-        if (parts[0]?.trim()) return parts[0].trim();
+        const name = titleMatch[1].split(':')[0]?.trim();
+        if (name && !name.includes('네이버') && !name.includes('플레이스')) return name;
       }
-    }
-  } catch { /* 폴백 */ }
+    } catch { /* 다음 타입 시도 */ }
+  }
 
-  // 2차: Playwright
+  // 2차: Playwright — map entry URL 사용 (카테고리 자동 감지)
   let context = null;
   try {
     const browser = await getBrowser(true);
@@ -437,28 +456,30 @@ export async function fetchPlaceName(placeId) {
       locale: 'ko-KR',
     });
     const page = await createLightPage(context);
-    await page.goto(`https://pcmap.place.naver.com/restaurant/${placeId}/home`, {
+    await page.goto(`https://map.naver.com/p/entry/place/${placeId}`, {
       waitUntil: 'domcontentloaded',
       timeout: 15000,
     });
-    await page.waitForTimeout(1500);
 
-    const name = await page.evaluate(() => {
-      const ogTitle = document.querySelector('meta[property="og:title"]');
-      if (ogTitle) {
-        const content = ogTitle.getAttribute('content') || '';
-        const parts = content.split(':');
-        if (parts[0]?.trim()) return parts[0].trim();
+    // place iframe 대기 후 이름 추출
+    let name = null;
+    for (let i = 0; i < 15; i++) {
+      await page.waitForTimeout(500);
+      const placeFrame = page.frames().find(f => f.url().includes('pcmap.place.naver.com'));
+      if (placeFrame) {
+        name = await placeFrame.evaluate(() => {
+          const el = document.querySelector('span.GHAhO, h2.tit, .Fc1rA');
+          if (el) return el.textContent?.trim() || null;
+          const ogTitle = document.querySelector('meta[property="og:title"]');
+          if (ogTitle) {
+            const n = ogTitle.getAttribute('content')?.split(':')[0]?.trim();
+            if (n && !n.includes('네이버') && !n.includes('플레이스')) return n;
+          }
+          return null;
+        }).catch(() => null);
+        if (name) break;
       }
-      const title = document.title || '';
-      if (title) {
-        const parts = title.split(':');
-        if (parts[0]?.trim()) return parts[0].trim();
-      }
-      const nameEl = document.querySelector('span.GHAhO, h2.tit');
-      if (nameEl) return nameEl.textContent?.trim() || null;
-      return null;
-    });
+    }
 
     await context.close().catch(() => {});
     return name;
