@@ -867,7 +867,11 @@
     const place = historyData?.places?.[placeId];
     if (!place) return;
 
-    title.textContent = `📋 ${place.placeName} 순위 이력`;
+    title.innerHTML = `<span style="flex:1">📋 ${esc(place.placeName)} 순위 이력</span>
+      <button class="btn" id="recheckBtn" onclick="recheckPlace('${placeId}')" style="width:auto;padding:8px 20px;font-size:13px">🔄 순위 재측정</button>`;
+    title.style.display = 'flex';
+    title.style.alignItems = 'center';
+    title.style.gap = '12px';
 
     const kwList = Object.keys(place.keywords || {});
 
@@ -932,6 +936,39 @@
           <td style="color:var(--text-dim)">${r.matchedBy || '-'}</td>
         </tr>`;
     }).join('');
+  }
+
+  // ─── 순위 재측정 ───
+  async function recheckPlace(placeId) {
+    const place = historyData?.places?.[placeId];
+    if (!place) return;
+
+    const btn = document.getElementById('recheckBtn');
+    btn.disabled = true;
+    btn.textContent = '측정 중...';
+
+    const kwList = Object.keys(place.keywords || {});
+    const url = place.url || place.placeId;
+
+    try {
+      for (const kw of kwList) {
+        btn.textContent = `측정 중... (${kw})`;
+        await fetch('/api/check', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, keywords: [kw] }),
+        });
+      }
+
+      await loadHistoryData();
+      renderPlaces();
+      showHistory(placeId);
+      btn.textContent = '🔄 순위 재측정';
+    } catch (err) {
+      alert('재측정 중 오류: ' + err.message);
+      btn.textContent = '🔄 순위 재측정';
+    }
+    btn.disabled = false;
   }
 
   // ─── 순위 차트 ───
