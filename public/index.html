@@ -1,0 +1,866 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>네이버 플레이스 순위 추적기</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --card: #1a1d27;
+      --card-hover: #22263a;
+      --border: #2a2e3e;
+      --text: #e4e6ed;
+      --text-dim: #8b8fa3;
+      --green: #03C75A;
+      --green-dim: rgba(3,199,90,0.15);
+      --red: #ff4757;
+      --red-dim: rgba(255,71,87,0.15);
+      --yellow: #ffc048;
+      --blue: #5b7fff;
+      --radius: 12px;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, 'Pretendard', 'Noto Sans KR', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* ─── Header ─── */
+    header {
+      background: linear-gradient(135deg, #141722 0%, #1a2035 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 28px 0;
+      text-align: center;
+    }
+    header h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.5px; }
+    header h1 span { color: var(--green); }
+    header p { color: var(--text-dim); font-size: 14px; margin-top: 6px; }
+
+    .container { max-width: 960px; margin: 0 auto; padding: 24px 20px; }
+
+    /* ─── Search Form ─── */
+    .search-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      margin-bottom: 28px;
+    }
+    .search-card h2 {
+      font-size: 16px; font-weight: 600; margin-bottom: 16px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .form-row {
+      display: flex; gap: 12px; margin-bottom: 12px;
+    }
+    .form-row input {
+      flex: 1; background: var(--bg); border: 1px solid var(--border);
+      border-radius: 8px; padding: 12px 16px; color: var(--text);
+      font-size: 14px; outline: none; transition: border-color 0.2s;
+    }
+    .form-row input:focus { border-color: var(--green); }
+    .form-row input::placeholder { color: var(--text-dim); }
+
+    /* ─── Keyword Tags ─── */
+    .kw-input-row {
+      display: flex; gap: 8px; margin-bottom: 12px; align-items: center;
+    }
+    .kw-input-row input {
+      flex: 1; background: var(--bg); border: 1px solid var(--border);
+      border-radius: 8px; padding: 10px 14px; color: var(--text);
+      font-size: 14px; outline: none; transition: border-color 0.2s;
+    }
+    .kw-input-row input:focus { border-color: var(--green); }
+    .kw-input-row input::placeholder { color: var(--text-dim); }
+    .btn-sm {
+      background: var(--border); color: var(--text); border: none;
+      border-radius: 8px; padding: 10px 16px; font-size: 13px;
+      font-weight: 600; cursor: pointer; white-space: nowrap;
+      transition: background 0.2s;
+    }
+    .btn-sm:hover { background: #3a3e5e; }
+
+    .tag-list {
+      display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px;
+      min-height: 28px;
+    }
+    .tag {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--green-dim); color: var(--green);
+      padding: 6px 12px; border-radius: 20px;
+      font-size: 13px; font-weight: 600;
+      animation: tagIn 0.2s ease;
+    }
+    @keyframes tagIn { from { transform: scale(0.8); opacity: 0; } }
+    .tag .tag-remove {
+      cursor: pointer; font-size: 15px; line-height: 1;
+      opacity: 0.6; transition: opacity 0.2s;
+    }
+    .tag .tag-remove:hover { opacity: 1; }
+    .tag-hint {
+      font-size: 12px; color: var(--text-dim);
+      padding: 4px 0;
+    }
+
+    .btn {
+      background: var(--green); color: #fff; border: none;
+      border-radius: 8px; padding: 12px 28px; font-size: 14px;
+      font-weight: 600; cursor: pointer; transition: opacity 0.2s;
+      white-space: nowrap; width: 100%;
+    }
+    .btn:hover { opacity: 0.85; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* ─── Live Results ─── */
+    .live-results {
+      display: none;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      margin-bottom: 28px;
+    }
+    .live-results.show { display: block; }
+    .live-results h3 {
+      font-size: 15px; margin-bottom: 16px; color: var(--green);
+      display: flex; align-items: center; gap: 8px;
+    }
+
+    .kw-result-card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px 20px;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      transition: border-color 0.3s;
+    }
+    .kw-result-card.done { border-color: var(--green); }
+    .kw-result-card.error { border-color: var(--red); }
+
+    .kw-result-rank {
+      font-size: 32px; font-weight: 800;
+      min-width: 70px; text-align: center;
+    }
+    .kw-result-rank.top3 { color: var(--green); }
+    .kw-result-rank.top10 { color: var(--yellow); }
+    .kw-result-rank.other { color: var(--text); }
+    .kw-result-rank.notfound { color: var(--red); font-size: 14px; }
+    .kw-result-rank.pending { color: var(--text-dim); font-size: 14px; }
+
+    .kw-result-info { flex: 1; }
+    .kw-result-keyword { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+    .kw-result-meta { font-size: 12px; color: var(--text-dim); }
+
+    .kw-result-change {
+      font-size: 14px; font-weight: 700;
+      padding: 4px 12px; border-radius: 6px;
+      white-space: nowrap;
+    }
+
+    .change-up { color: var(--green); background: var(--green-dim); }
+    .change-down { color: var(--red); background: var(--red-dim); }
+    .change-same { color: var(--text-dim); }
+
+    /* mini spinner */
+    .mini-spinner {
+      display: inline-block; width: 20px; height: 20px;
+      border: 2px solid var(--border); border-top-color: var(--green);
+      border-radius: 50%; animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ─── Progress Bar ─── */
+    .progress-bar {
+      background: var(--border); border-radius: 4px;
+      height: 4px; margin-bottom: 16px; overflow: hidden;
+    }
+    .progress-fill {
+      background: var(--green); height: 100%;
+      border-radius: 4px; transition: width 0.5s ease;
+      width: 0%;
+    }
+
+    /* ─── Section Title ─── */
+    .section-title {
+      font-size: 18px; font-weight: 700; margin-bottom: 16px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .badge {
+      font-size: 12px; background: var(--green-dim); color: var(--green);
+      padding: 2px 8px; border-radius: 10px; font-weight: 600;
+    }
+
+    /* ─── Place Cards ─── */
+    .place-grid {
+      display: grid; grid-template-columns: 1fr;
+      gap: 16px; margin-bottom: 32px;
+    }
+    .place-card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 20px 24px;
+      transition: border-color 0.2s, background 0.2s; cursor: pointer;
+    }
+    .place-card:hover {
+      border-color: var(--green); background: var(--card-hover);
+    }
+    .place-header {
+      display: flex; justify-content: space-between;
+      align-items: center; margin-bottom: 14px;
+    }
+    .place-name { font-size: 17px; font-weight: 700; }
+    .place-id {
+      font-size: 12px; color: var(--text-dim);
+      font-family: 'SF Mono', 'Menlo', monospace;
+    }
+    .keyword-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 10px;
+    }
+    .keyword-chip {
+      display: flex; justify-content: space-between; align-items: center;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 8px; padding: 10px 14px;
+    }
+    .kw-name { font-size: 13px; font-weight: 500; }
+    .kw-rank {
+      font-size: 18px; font-weight: 800;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .kw-rank.top3 { color: var(--green); }
+    .kw-rank.top10 { color: var(--yellow); }
+    .kw-rank.other { color: var(--text); }
+    .kw-rank.notfound { color: var(--red); font-size: 13px; }
+    .kw-change { font-size: 12px; font-weight: 600; }
+
+    /* ─── History Table ─── */
+    .history-section {
+      display: none; background: var(--card);
+      border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 20px 24px; margin-bottom: 24px;
+    }
+    .history-section.show { display: block; }
+    .history-section h3 { font-size: 15px; margin-bottom: 14px; }
+    .history-tabs {
+      display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap;
+    }
+    .history-tab {
+      padding: 6px 14px; border-radius: 20px; font-size: 12px;
+      font-weight: 600; cursor: pointer; border: 1px solid var(--border);
+      background: transparent; color: var(--text-dim); transition: all 0.2s;
+    }
+    .history-tab.active {
+      background: var(--green-dim); color: var(--green);
+      border-color: var(--green);
+    }
+    .history-tab:hover { border-color: var(--green); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th {
+      text-align: left; padding: 8px 12px;
+      border-bottom: 2px solid var(--border);
+      color: var(--text-dim); font-weight: 600;
+    }
+    td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+    tr:hover td { background: rgba(255,255,255,0.02); }
+
+    /* ─── Empty State ─── */
+    .empty {
+      text-align: center; padding: 60px 20px; color: var(--text-dim);
+    }
+    .empty-icon { font-size: 48px; margin-bottom: 12px; opacity: 0.4; }
+    .empty p { font-size: 14px; }
+
+    /* ─── Favorites ─── */
+    .fav-section { margin-bottom: 28px; }
+    .fav-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 12px;
+    }
+    .fav-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 10px;
+    }
+    .fav-card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 10px; padding: 14px 16px;
+      cursor: pointer; transition: all 0.2s; position: relative;
+    }
+    .fav-card:hover {
+      border-color: var(--green); background: var(--card-hover);
+    }
+    .fav-card.active { border-color: var(--green); box-shadow: 0 0 0 1px var(--green); }
+    .fav-name { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+    .fav-kws {
+      font-size: 12px; color: var(--text-dim);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .fav-remove {
+      position: absolute; top: 8px; right: 10px;
+      background: none; border: none; color: var(--text-dim);
+      cursor: pointer; font-size: 16px; line-height: 1;
+      opacity: 0; transition: opacity 0.2s;
+    }
+    .fav-card:hover .fav-remove { opacity: 1; }
+    .fav-remove:hover { color: var(--red); }
+    .fav-empty {
+      text-align: center; padding: 20px;
+      color: var(--text-dim); font-size: 13px;
+      background: var(--card); border: 1px dashed var(--border);
+      border-radius: 10px;
+    }
+
+    .btn-fav {
+      background: transparent; border: 1px solid var(--border);
+      color: var(--text-dim); border-radius: 8px;
+      padding: 10px 16px; font-size: 13px; font-weight: 600;
+      cursor: pointer; transition: all 0.2s; white-space: nowrap;
+    }
+    .btn-fav:hover { border-color: var(--yellow); color: var(--yellow); }
+    .btn-fav.saved { border-color: var(--yellow); color: var(--yellow); }
+
+    @media (max-width: 640px) {
+      .form-row { flex-direction: column; }
+      .kw-input-row { flex-direction: column; }
+      .keyword-grid { grid-template-columns: 1fr; }
+      .fav-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1><span>N</span> 플레이스 순위 추적기</h1>
+  <p>네이버 지도 검색 순위를 실시간으로 확인하고 변동을 추적합니다</p>
+</header>
+
+<div class="container">
+
+  <!-- 즐겨찾기 -->
+  <div class="fav-section">
+    <div class="fav-header">
+      <div class="section-title">⭐ 즐겨찾기 <span class="badge" id="favCount">0</span></div>
+    </div>
+    <div id="favGrid" class="fav-grid"></div>
+  </div>
+
+  <!-- 순위 조회 폼 -->
+  <div class="search-card">
+    <h2>🔍 순위 조회</h2>
+    <div class="form-row">
+      <input type="text" id="placeUrl" placeholder="네이버 플레이스 URL 또는 Place ID (예: 2082878069)">
+    </div>
+
+    <div class="kw-input-row">
+      <input type="text" id="kwInput" placeholder="키워드 입력 후 Enter 또는 추가 버튼">
+      <button class="btn-sm" onclick="addKeyword()">+ 추가</button>
+    </div>
+
+    <div class="tag-list" id="tagList">
+      <span class="tag-hint" id="tagHint">키워드를 추가해주세요 (여러 개 가능)</span>
+    </div>
+
+    <div style="display:flex;gap:10px;">
+      <button class="btn" id="checkBtn" onclick="runCheck()" style="flex:1">🔍 전체 키워드 순위 조회</button>
+      <button class="btn-fav" id="favBtn" onclick="toggleFavorite()">☆ 즐겨찾기</button>
+    </div>
+  </div>
+
+  <!-- 실시간 결과 -->
+  <div class="live-results" id="liveResults">
+    <h3 id="liveTitle">조회 결과</h3>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+    <div id="liveCards"></div>
+  </div>
+
+  <!-- 추적 중인 업체 -->
+  <div id="placesSection">
+    <div class="section-title">
+      📊 추적 중인 업체 <span class="badge" id="placeCount">0</span>
+    </div>
+    <div class="place-grid" id="placeGrid"></div>
+  </div>
+
+  <!-- 이력 상세 -->
+  <div class="history-section" id="historySection">
+    <h3 id="historyTitle">순위 이력</h3>
+    <div class="history-tabs" id="historyTabs"></div>
+    <table>
+      <thead>
+        <tr>
+          <th>날짜/시간</th>
+          <th>순위</th>
+          <th>변동</th>
+          <th>매칭</th>
+        </tr>
+      </thead>
+      <tbody id="historyBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+  let historyData = null;
+  const keywordList = [];
+  const FAV_KEY = 'npt_favorites';
+
+  // ─── 즐겨찾기 관리 ───
+  function loadFavorites() {
+    try { return JSON.parse(localStorage.getItem(FAV_KEY)) || []; }
+    catch { return []; }
+  }
+
+  function saveFavorites(favs) {
+    localStorage.setItem(FAV_KEY, JSON.stringify(favs));
+  }
+
+  function renderFavorites() {
+    const favs = loadFavorites();
+    const grid = document.getElementById('favGrid');
+    document.getElementById('favCount').textContent = favs.length;
+
+    if (favs.length === 0) {
+      grid.innerHTML = '<div class="fav-empty">URL과 키워드를 입력한 뒤 ☆ 즐겨찾기 버튼을 눌러 저장하세요</div>';
+      return;
+    }
+
+    grid.innerHTML = favs.map((fav, i) => `
+      <div class="fav-card" onclick="loadFavorite(${i})" title="${esc(fav.url)}">
+        <button class="fav-remove" onclick="event.stopPropagation();removeFavorite(${i})">&times;</button>
+        <div class="fav-name">${esc(fav.name || fav.url)}</div>
+        <div class="fav-kws">${fav.keywords.map(k => esc(k)).join(', ')}</div>
+      </div>
+    `).join('');
+
+    updateFavBtn();
+  }
+
+  function loadFavorite(idx) {
+    const favs = loadFavorites();
+    const fav = favs[idx];
+    if (!fav) return;
+
+    document.getElementById('placeUrl').value = fav.url;
+    keywordList.length = 0;
+    keywordList.push(...fav.keywords);
+    renderTags();
+    updateFavBtn();
+
+    // 카드 하이라이트
+    document.querySelectorAll('.fav-card').forEach((c, i) => {
+      c.classList.toggle('active', i === idx);
+    });
+  }
+
+  function toggleFavorite() {
+    const url = document.getElementById('placeUrl').value.trim();
+    if (!url) { alert('Place URL 또는 ID를 먼저 입력해주세요.'); return; }
+    if (keywordList.length === 0) { alert('키워드를 1개 이상 추가해주세요.'); return; }
+
+    const favs = loadFavorites();
+    const existIdx = favs.findIndex(f => f.url === url);
+
+    if (existIdx >= 0) {
+      // 이미 있으면 삭제
+      favs.splice(existIdx, 1);
+      saveFavorites(favs);
+      renderFavorites();
+      return;
+    }
+
+    if (favs.length >= 10) {
+      alert('즐겨찾기는 최대 10개까지 저장할 수 있습니다.');
+      return;
+    }
+
+    // 업체명 가져오기 시도
+    const placeName = findPlaceName(url);
+
+    favs.push({
+      url,
+      name: placeName || url,
+      keywords: [...keywordList],
+      createdAt: new Date().toISOString(),
+    });
+    saveFavorites(favs);
+    renderFavorites();
+  }
+
+  function removeFavorite(idx) {
+    const favs = loadFavorites();
+    favs.splice(idx, 1);
+    saveFavorites(favs);
+    renderFavorites();
+  }
+
+  function findPlaceName(url) {
+    // history에서 업체명 찾기
+    if (!historyData?.places) return null;
+    for (const p of Object.values(historyData.places)) {
+      if (p.url === url || p.placeId === url) return p.placeName !== p.placeId ? p.placeName : null;
+    }
+    return null;
+  }
+
+  function updateFavBtn() {
+    const btn = document.getElementById('favBtn');
+    const url = document.getElementById('placeUrl').value.trim();
+    const favs = loadFavorites();
+    const isSaved = favs.some(f => f.url === url);
+    btn.textContent = isSaved ? '★ 저장됨' : '☆ 즐겨찾기';
+    btn.classList.toggle('saved', isSaved);
+  }
+
+  // URL 입력 변경 시 즐겨찾기 버튼 상태 업데이트
+  document.getElementById('placeUrl').addEventListener('input', updateFavBtn);
+
+  // ─── 초기화 ───
+  async function init() {
+    await loadHistoryData();
+    renderPlaces();
+    renderFavorites();
+  }
+
+  async function loadHistoryData() {
+    try {
+      const resp = await fetch('/api/history');
+      historyData = await resp.json();
+    } catch { historyData = { places: {} }; }
+  }
+
+  // ─── 키워드 태그 관리 ───
+  function addKeyword(value) {
+    const input = document.getElementById('kwInput');
+    const raw = value || input.value.trim();
+    if (!raw) return;
+
+    // 쉼표로 여러 개 입력 지원
+    const newKws = raw.split(',').map(k => k.trim()).filter(k => k && !keywordList.includes(k));
+    keywordList.push(...newKws);
+    input.value = '';
+    renderTags();
+    input.focus();
+  }
+
+  function removeKeyword(idx) {
+    keywordList.splice(idx, 1);
+    renderTags();
+  }
+
+  function renderTags() {
+    const list = document.getElementById('tagList');
+    const hint = document.getElementById('tagHint');
+
+    if (keywordList.length === 0) {
+      list.innerHTML = '<span class="tag-hint" id="tagHint">키워드를 추가해주세요 (여러 개 가능)</span>';
+      return;
+    }
+
+    list.innerHTML = keywordList.map((kw, i) => `
+      <span class="tag">
+        ${esc(kw)}
+        <span class="tag-remove" onclick="removeKeyword(${i})">&times;</span>
+      </span>
+    `).join('');
+  }
+
+  // 키워드 input Enter/쉼표 핸들링 (한글 IME 대응)
+  document.getElementById('kwInput').addEventListener('keydown', e => {
+    // 한글 IME 조합 중이면 무시 (조합 완료 후 다시 Enter)
+    if (e.isComposing || e.keyCode === 229) return;
+
+    if (e.key === 'Enter' || e.key === ',') {
+      e.preventDefault();
+      addKeyword();
+    }
+    // Backspace로 마지막 태그 삭제
+    if (e.key === 'Backspace' && !e.target.value && keywordList.length > 0) {
+      keywordList.pop();
+      renderTags();
+    }
+  });
+
+  document.getElementById('placeUrl').addEventListener('keydown', e => {
+    if (e.key === 'Enter') document.getElementById('kwInput').focus();
+  });
+
+  // ─── 순위 조회 (키워드별 개별 호출) ───
+  async function runCheck() {
+    const urlInput = document.getElementById('placeUrl').value.trim();
+
+    if (!urlInput) { alert('Place URL 또는 ID를 입력해주세요.'); return; }
+    if (keywordList.length === 0) { alert('키워드를 1개 이상 추가해주세요.'); return; }
+
+    const btn = document.getElementById('checkBtn');
+    const liveSection = document.getElementById('liveResults');
+    const liveCards = document.getElementById('liveCards');
+    const liveTitle = document.getElementById('liveTitle');
+    const progressFill = document.getElementById('progressFill');
+
+    btn.disabled = true;
+    liveSection.classList.add('show');
+    progressFill.style.width = '0%';
+
+    // 카드 초기 렌더 (대기 상태)
+    liveCards.innerHTML = keywordList.map((kw, i) => `
+      <div class="kw-result-card" id="kwCard${i}">
+        <div class="kw-result-rank pending" id="kwRank${i}">
+          <div class="mini-spinner"></div>
+        </div>
+        <div class="kw-result-info">
+          <div class="kw-result-keyword">${esc(kw)}</div>
+          <div class="kw-result-meta" id="kwMeta${i}">대기 중...</div>
+        </div>
+        <div id="kwChange${i}"></div>
+      </div>
+    `).join('');
+
+    liveTitle.innerHTML = `조회 중... <span style="font-weight:400;color:var(--text-dim)">(0 / ${keywordList.length})</span>`;
+
+    let completed = 0;
+
+    // 키워드별 순차 조회
+    for (let i = 0; i < keywordList.length; i++) {
+      const kw = keywordList[i];
+      const card = document.getElementById(`kwCard${i}`);
+      const rankEl = document.getElementById(`kwRank${i}`);
+      const metaEl = document.getElementById(`kwMeta${i}`);
+      const changeEl = document.getElementById(`kwChange${i}`);
+
+      metaEl.textContent = '크롤링 중...';
+
+      try {
+        const resp = await fetch('/api/check', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: urlInput, keywords: [kw] }),
+        });
+        const data = await resp.json();
+
+        if (data.error) {
+          rankEl.className = 'kw-result-rank notfound';
+          rankEl.textContent = '오류';
+          metaEl.textContent = data.error;
+          card.classList.add('error');
+        } else {
+          const r = data.results[0];
+          const rank = r.rank;
+
+          // 순위 표시
+          if (!r.found) {
+            rankEl.className = 'kw-result-rank notfound';
+            rankEl.textContent = '순위권 밖';
+          } else {
+            const cls = rank <= 3 ? 'top3' : rank <= 10 ? 'top10' : 'other';
+            rankEl.className = `kw-result-rank ${cls}`;
+            rankEl.textContent = `${rank}위`;
+          }
+
+          // 메타 정보
+          metaEl.textContent = `탐색 ${r.totalResults || 0}개 · ${r.matchedBy || '-'} · ${r.placeName || ''}`;
+
+          // 변동
+          if (r.found && r.previousRank !== null) {
+            const diff = r.previousRank - rank;
+            if (diff > 0) changeEl.innerHTML = `<span class="kw-result-change change-up">▲ ${diff}</span>`;
+            else if (diff < 0) changeEl.innerHTML = `<span class="kw-result-change change-down">▼ ${Math.abs(diff)}</span>`;
+            else changeEl.innerHTML = `<span class="kw-result-change change-same">—</span>`;
+          } else if (r.found) {
+            changeEl.innerHTML = `<span class="kw-result-change change-same">첫 조회</span>`;
+          }
+
+          card.classList.add('done');
+
+          // 업체명 표시
+          if (data.placeName && completed === 0) {
+            liveTitle.innerHTML = `${esc(data.placeName)} <span style="font-weight:400;color:var(--text-dim)">순위 조회</span>`;
+          }
+        }
+      } catch (err) {
+        rankEl.className = 'kw-result-rank notfound';
+        rankEl.textContent = '오류';
+        metaEl.textContent = err.message;
+        card.classList.add('error');
+      }
+
+      completed++;
+      progressFill.style.width = `${(completed / keywordList.length) * 100}%`;
+      liveTitle.innerHTML = liveTitle.innerHTML.replace(
+        /\(\d+ \/ \d+\)/,
+        `(${completed} / ${keywordList.length})`
+      );
+    }
+
+    // 완료
+    liveTitle.innerHTML = liveTitle.innerHTML.replace(
+      /조회 중\.\.\.|순위 조회/,
+      '조회 완료 ✓'
+    );
+
+    btn.disabled = false;
+    await loadHistoryData();
+    renderPlaces();
+
+    // 즐겨찾기 업체명 자동 업데이트
+    updateFavName(urlInput);
+    renderFavorites();
+  }
+
+  function updateFavName(url) {
+    const favs = loadFavorites();
+    const fav = favs.find(f => f.url === url);
+    if (!fav) return;
+    const name = findPlaceName(url);
+    if (name && name !== fav.name) {
+      fav.name = name;
+      saveFavorites(favs);
+    }
+  }
+
+  // ─── 업체 카드 렌더링 ───
+  function renderPlaces() {
+    const grid = document.getElementById('placeGrid');
+    const places = historyData?.places || {};
+    const entries = Object.values(places).filter(p => p.placeName && p.placeName !== p.placeId);
+
+    document.getElementById('placeCount').textContent = entries.length;
+
+    if (entries.length === 0) {
+      grid.innerHTML = `
+        <div class="empty">
+          <div class="empty-icon">📍</div>
+          <p>아직 추적 중인 업체가 없습니다.<br>위 폼에서 순위를 조회해보세요!</p>
+        </div>`;
+      return;
+    }
+
+    grid.innerHTML = entries.map(place => {
+      const kwEntries = Object.entries(place.keywords || {});
+      const kwChips = kwEntries.map(([kw, data]) => {
+        const latest = data.records[0];
+        const prev = data.records[1];
+        const rank = latest?.rank;
+        const prevRank = prev?.rank;
+
+        let rankClass = 'other';
+        let rankText = rank ? `${rank}위` : '순위권 밖';
+        if (rank === null) rankClass = 'notfound';
+        else if (rank <= 3) rankClass = 'top3';
+        else if (rank <= 10) rankClass = 'top10';
+
+        let changeHtml = '';
+        if (rank !== null && prevRank !== null) {
+          const diff = prevRank - rank;
+          if (diff > 0) changeHtml = `<span class="kw-change change-up">▲${diff}</span>`;
+          else if (diff < 0) changeHtml = `<span class="kw-change change-down">▼${Math.abs(diff)}</span>`;
+          else changeHtml = `<span class="kw-change change-same">—</span>`;
+        }
+
+        return `
+          <div class="keyword-chip">
+            <span class="kw-name">${esc(kw)}</span>
+            <span class="kw-rank ${rankClass}">${rankText} ${changeHtml}</span>
+          </div>`;
+      }).join('');
+
+      return `
+        <div class="place-card" onclick="showHistory('${place.placeId}')">
+          <div class="place-header">
+            <span class="place-name">${esc(place.placeName)}</span>
+            <span class="place-id">${place.placeId}</span>
+          </div>
+          <div class="keyword-grid">${kwChips}</div>
+        </div>`;
+    }).join('');
+  }
+
+  // ─── 이력 상세 (키워드별 탭) ───
+  function showHistory(placeId) {
+    const section = document.getElementById('historySection');
+    const title = document.getElementById('historyTitle');
+    const tabs = document.getElementById('historyTabs');
+    const body = document.getElementById('historyBody');
+
+    const place = historyData?.places?.[placeId];
+    if (!place) return;
+
+    title.textContent = `📋 ${place.placeName} 순위 이력`;
+
+    const kwList = Object.keys(place.keywords || {});
+
+    // 탭 렌더링
+    tabs.innerHTML = `
+      <button class="history-tab active" onclick="filterHistory('${placeId}', null, this)">전체</button>
+      ${kwList.map(kw => `
+        <button class="history-tab" onclick="filterHistory('${placeId}', '${esc(kw)}', this)">${esc(kw)}</button>
+      `).join('')}
+    `;
+
+    filterHistory(placeId, null, tabs.querySelector('.active'));
+    section.classList.add('show');
+    section.scrollIntoView({ behavior: 'smooth' });
+  }
+
+  function filterHistory(placeId, keyword, tabEl) {
+    // 탭 활성화
+    document.querySelectorAll('.history-tab').forEach(t => t.classList.remove('active'));
+    if (tabEl) tabEl.classList.add('active');
+
+    const place = historyData?.places?.[placeId];
+    if (!place) return;
+
+    const body = document.getElementById('historyBody');
+    const allRecords = [];
+
+    const keywords = keyword ? { [keyword]: place.keywords[keyword] } : place.keywords;
+
+    for (const [kw, data] of Object.entries(keywords || {})) {
+      for (let i = 0; i < (data?.records?.length || 0); i++) {
+        const r = data.records[i];
+        const prev = data.records[i + 1];
+        allRecords.push({ keyword: kw, ...r, prevRank: prev?.rank ?? null });
+      }
+    }
+
+    allRecords.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+    body.innerHTML = allRecords.map(r => {
+      const date = new Date(r.timestamp).toLocaleString('ko-KR');
+      const rankText = r.rank !== null ? `${r.rank}위` : '순위권 밖';
+      const rankStyle = r.rank === null ? 'color:var(--red)'
+        : r.rank <= 3 ? 'color:var(--green);font-weight:700'
+        : r.rank <= 10 ? 'color:var(--yellow);font-weight:700' : '';
+
+      let changeText = '—';
+      if (r.rank !== null && r.prevRank !== null) {
+        const diff = r.prevRank - r.rank;
+        if (diff > 0) changeText = `<span style="color:var(--green)">▲ ${diff}</span>`;
+        else if (diff < 0) changeText = `<span style="color:var(--red)">▼ ${Math.abs(diff)}</span>`;
+      }
+
+      return `
+        <tr>
+          <td>${date}</td>
+          <td style="${rankStyle}">${rankText}</td>
+          <td>${changeText}</td>
+          <td style="color:var(--text-dim)">${r.matchedBy || '-'}</td>
+        </tr>`;
+    }).join('');
+  }
+
+  function esc(str) {
+    const d = document.createElement('div');
+    d.textContent = str || '';
+    return d.innerHTML;
+  }
+
+  init();
+</script>
+</body>
+</html>
