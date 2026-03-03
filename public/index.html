@@ -644,11 +644,6 @@
       e.preventDefault();
       addKeyword();
     }
-    // Backspace로 마지막 태그 삭제
-    if (e.key === 'Backspace' && !e.target.value && keywordList.length > 0) {
-      keywordList.pop();
-      renderTags();
-    }
   });
 
   // URL 변경 시 키워드 리셋
