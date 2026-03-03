@@ -885,6 +885,15 @@
 
     filterHistory(placeId, null, tabs.querySelector('.active'));
     section.classList.add('show');
+
+    // 순위 조회 폼에 URL + 키워드 채우기
+    document.getElementById('placeUrl').value = place.url || place.placeId;
+    lastPlaceUrl = place.url || place.placeId;
+    keywordList.length = 0;
+    keywordList.push(...kwList);
+    renderTags();
+    updateFavBtn();
+
     section.scrollIntoView({ behavior: 'smooth' });
   }
 
