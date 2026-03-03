@@ -83,13 +83,14 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      // 업체명 조회
-      let placeName = null;
-      try {
-        placeName = await fetchPlaceName(placeId);
-      } catch { /* 무시 */ }
-
+      // 업체명 조회 (이력에 있으면 브라우저 생략)
       const history = await loadHistory();
+      let placeName = history.places?.[placeId]?.placeName || null;
+      if (!placeName || placeName === placeId) {
+        try {
+          placeName = await fetchPlaceName(placeId);
+        } catch { /* 무시 */ }
+      }
       const results = [];
 
       for (const keyword of keywords) {
