@@ -181,6 +181,12 @@ export async function crawlNaverPlace(keyword, options = {}) {
 
       await context.close().catch(() => {});
 
+      // 키워드별 메모리 확보: 브라우저도 완전 종료
+      if (_browser) {
+        await _browser.close().catch(() => {});
+        _browser = null;
+      }
+
       const organicResults = results.filter(r => !r.isAd);
       return organicResults.map((r, i) => ({
         rank: i + 1,

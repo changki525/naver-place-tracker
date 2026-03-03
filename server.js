@@ -8,7 +8,7 @@ import { readFile } from 'fs/promises';
 import { dirname, resolve, extname } from 'path';
 import { fileURLToPath } from 'url';
 
-import { crawlNaverPlace, fetchPlaceName, fetchPlaceCoords, resolveRedirectUrl } from './src/crawler.js';
+import { crawlNaverPlace, fetchPlaceName, fetchPlaceCoords, resolveRedirectUrl, closeBrowser } from './src/crawler.js';
 import { extractPlaceId, parseRankFromResults } from './src/parser.js';
 import { loadHistory, saveResult, getPreviousRank } from './src/history.js';
 
@@ -125,6 +125,9 @@ const server = createServer(async (req, res) => {
           }
         } catch { /* 좌표 없이 진행 */ }
       }
+
+      // 좌표/업체명 조회 후 브라우저 완전 종료 → 메모리 해제
+      await closeBrowser();
 
       const results = [];
 
