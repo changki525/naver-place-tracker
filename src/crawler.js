@@ -1,13 +1,15 @@
 /**
  * 네이버 지도 검색 결과 크롤링
  *
- * 정확도 전략:
- * - DOM 순서 = 실제 화면 표시 순서 (정확한 순위)
- * - Apollo State = 누락된 DOM 항목 보충 + placeId 보충
+ * 전략: Apollo State(SSR) 기반 + API 인터셉션 보충 + DOM 광고 감지
+ *
+ * - Apollo State: 페이지당 70개 항목, SSR로 즉시 사용 가능 (스크롤 불필요)
+ * - allSearch API: 인터셉션으로 보충 데이터 수집 (placeId 보강)
+ * - DOM: 광고 판별용 최소한의 체크만 수행
  *
  * 속도 최적화:
  * - 이미지/폰트/미디어/광고 리소스 차단
- * - 스크롤 대기 시간 최소화
+ * - 스크롤 제거 → Apollo State 직접 접근
  */
 import { chromium } from 'playwright';
 
@@ -73,7 +75,7 @@ async function createLightPage(context) {
 /**
  * 네이버 지도에서 키워드 검색 후 플레이스 결과 목록을 반환한다.
  *
- * 순위 정확도: DOM 순서(실제 화면) 기준 + Apollo 누락분 보충
+ * 전략: Apollo State(SSR) 기반 + allSearch API 인터셉션 + DOM 광고 감지
  */
 export async function crawlNaverPlace(keyword, options = {}) {
   const { maxRank = 200, headless = true, lng = null, lat = null } = options;
@@ -89,6 +91,26 @@ export async function crawlNaverPlace(keyword, options = {}) {
       });
       const page = await createLightPage(context);
 
+      // allSearch API 인터셉션 — 보충 데이터 수집
+      const apiItems = [];
+      page.on('response', async (response) => {
+        if (response.url().includes('api/search/allSearch')) {
+          try {
+            const data = await response.json();
+            const list = data?.result?.place?.list;
+            if (Array.isArray(list)) {
+              for (const item of list) {
+                apiItems.push({
+                  placeId: String(item.id),
+                  placeName: item.name,
+                  isAd: item.isAdEntry === true,
+                });
+              }
+            }
+          } catch { /* 무시 */ }
+        }
+      });
+
       // 네이버 지도 검색 페이지 접속
       let searchUrl = `https://map.naver.com/p/search/${encodeURIComponent(keyword)}`;
       if (lng && lat) {
@@ -96,7 +118,7 @@ export async function crawlNaverPlace(keyword, options = {}) {
       }
       await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-      // searchIframe 대기
+      // searchIframe 대기 (Apollo State가 로드될 때까지)
       let searchFrame = null;
       for (let attempt = 0; attempt < 25; attempt++) {
         await page.waitForTimeout(400);
@@ -106,10 +128,20 @@ export async function crawlNaverPlace(keyword, options = {}) {
         );
         if (searchFrame) {
           try {
-            const hasResults = await searchFrame.evaluate(() =>
+            const hasApollo = await searchFrame.evaluate(() => {
+              const apollo = window.__APOLLO_STATE__;
+              if (!apollo || !apollo['ROOT_QUERY']) return false;
+              return Object.keys(apollo['ROOT_QUERY']).some(
+                k => k.includes('List') && !k.includes('Filter') &&
+                     (k.includes('"display":70') || k.includes('"display":50'))
+              );
+            });
+            if (hasApollo) break;
+            // Apollo 없으면 DOM이라도 있는지 확인
+            const hasDom = await searchFrame.evaluate(() =>
               document.querySelectorAll('li.UEzoS').length > 0
             );
-            if (hasResults) break;
+            if (hasDom && attempt >= 10) break; // Apollo 포기, DOM 사용
           } catch { /* 프레임 준비 안됨 */ }
         }
       }
@@ -119,7 +151,9 @@ export async function crawlNaverPlace(keyword, options = {}) {
         return [];
       }
 
-      // 현재 페이지 DOM + Apollo 수집
+      // 수집 루프
+      // 페이지 1: Apollo State (SSR, 70개, 스크롤 불필요) + DOM 광고 감지
+      // 페이지 2+: DOM 수집 (Apollo는 페이지 전환 시 갱신되지 않음)
       const results = [];
       let organicCount = 0;
       let currentPage = 1;
@@ -128,22 +162,49 @@ export async function crawlNaverPlace(keyword, options = {}) {
       const seenNames = new Set();
 
       while (organicCount < maxRank && currentPage <= MAX_PAGES) {
-        // 스크롤하여 전체 DOM 로드
-        await scrollToBottom(searchFrame);
+        let pageItems;
 
-        // DOM 수집 (실제 화면 순서 = 정확한 순위)
-        const domItems = await collectDomItems(searchFrame);
-        // Apollo 수집 (누락분 보충 + placeId)
-        const apolloItems = await collectApolloItems(searchFrame);
+        if (currentPage === 1) {
+          // ── 페이지 1: Apollo State 우선 ──
+          const apolloItems = await collectApolloItems(searchFrame);
+          const adInfo = await collectAdInfo(searchFrame);
 
-        // DOM 기반 병합 (DOM 순서 유지, Apollo 누락분 삽입)
-        const pageItems = mergeDomFirst(domItems, apolloItems);
+          if (apolloItems.length > 0) {
+            // Apollo 기반 + DOM 광고 정보 병합
+            pageItems = apolloItems.map(item => {
+              const domMatch = adInfo.find(d => d.placeName === item.placeName);
+              const isAd = domMatch ? domMatch.isAd : false;
+              return { ...item, isAd };
+            });
+            // API 인터셉션 데이터로 placeId 보충
+            for (const item of pageItems) {
+              if (!item.placeId) {
+                const apiMatch = apiItems.find(a => a.placeName === item.placeName);
+                if (apiMatch) item.placeId = apiMatch.placeId;
+              }
+            }
+          } else {
+            // Apollo 없으면 DOM 폴백
+            await scrollToBottom(searchFrame);
+            pageItems = await collectDomItems(searchFrame);
+          }
+        } else {
+          // ── 페이지 2+: DOM 수집 (Apollo는 갱신 안 됨) ──
+          await scrollToBottom(searchFrame);
+          pageItems = await collectDomItems(searchFrame);
+          // API 인터셉션 데이터로 placeId 보충
+          for (const item of pageItems) {
+            if (!item.placeId) {
+              const apiMatch = apiItems.find(a => a.placeName === item.placeName);
+              if (apiMatch) item.placeId = apiMatch.placeId;
+            }
+          }
+        }
 
-        // 광고는 maxRank 카운트에서 제외, 중복도 제거
+        // 중복 제거 + 수집
         for (const item of pageItems) {
           if (organicCount >= maxRank) break;
 
-          // 중복 체크 (placeId 또는 이름 기준)
           const idKey = item.placeId || null;
           const nameKey = item.placeName;
           if ((idKey && seenIds.has(idKey)) || seenNames.has(nameKey)) continue;
@@ -165,13 +226,25 @@ export async function crawlNaverPlace(keyword, options = {}) {
         if (!hasNext) break;
 
         currentPage++;
-        await page.waitForTimeout(2500);
+        // 페이지 전환 후 DOM 로드 대기
+        await page.waitForTimeout(2000);
+        // DOM이 새 페이지 항목으로 갱신될 때까지 대기
+        for (let i = 0; i < 10; i++) {
+          await page.waitForTimeout(300);
+          try {
+            const firstDomName = await searchFrame.evaluate(() => {
+              const first = document.querySelector('li.UEzoS span.TYaxT');
+              return first?.textContent?.trim() || null;
+            });
+            if (firstDomName && !seenNames.has(firstDomName)) break;
+          } catch { /* 대기 */ }
+        }
       }
 
       await context.close().catch(() => {});
 
       const organicResults = results.filter(r => !r.isAd);
-      console.log(`[crawl] ${keyword}: ${organicResults.length}건 수집`);
+      console.log(`[crawl] ${keyword}: ${organicResults.length}건 수집 (${currentPage}페이지)`);
       return organicResults.map((r, i) => ({
         rank: i + 1,
         placeId: r.placeId,
@@ -228,7 +301,35 @@ async function scrollToBottom(frame) {
 }
 
 /**
- * DOM에서 업체 목록을 수집한다.
+ * DOM에서 광고 판별 정보만 수집한다.
+ * Apollo State에는 광고 정보가 없으므로 DOM에서만 확인.
+ */
+async function collectAdInfo(frame) {
+  try {
+    return await frame.evaluate(() => {
+      const items = [];
+      const lis = document.querySelectorAll('li.UEzoS');
+      for (const li of lis) {
+        const nameEl = li.querySelector('span.TYaxT');
+        if (!nameEl) continue;
+        const placeName = nameEl.textContent?.trim() || '';
+        if (!placeName) continue;
+        const isAd = !!(
+          li.querySelector('.cZnHG') ||
+          li.querySelector('[class*="icon_ad"]') ||
+          li.getAttribute('data-laim-exp-id')?.includes('*e')
+        );
+        items.push({ placeName, isAd });
+      }
+      return items;
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * DOM에서 업체 목록을 수집한다 (Apollo 없을 때 폴백용).
  * 순서 = 실제 화면 표시 순서 (정확한 순위).
  */
 async function collectDomItems(frame) {
@@ -315,71 +416,6 @@ async function collectApolloItems(frame) {
   } catch {
     return [];
   }
-}
-
-/**
- * DOM 순서를 기준으로 결과를 병합한다.
- *
- * DOM 순서 = 실제 화면 표시 순서 (정확한 순위).
- * Apollo에만 있는 항목은 Apollo 내 이웃 기준으로 올바른 위치에 삽입.
- */
-function mergeDomFirst(domItems, apolloItems) {
-  if (apolloItems.length === 0) return domItems;
-
-  const domAds = domItems.filter(d => d.isAd);
-  const domOrganic = domItems.filter(d => !d.isAd);
-
-  // DOM 항목에 Apollo placeId 보충
-  const enriched = domOrganic.map(d => {
-    if (d.placeId) return d;
-    // placeId가 없으면 Apollo에서 이름 매칭으로 보충
-    const aMatch = apolloItems.find(a => a.placeName === d.placeName);
-    return aMatch ? { ...d, placeId: aMatch.placeId } : d;
-  });
-
-  // DOM에 없는 Apollo 항목 찾기
-  const domNameSet = new Set(domOrganic.map(d => d.placeName));
-  const domIdSet = new Set(domOrganic.filter(d => d.placeId).map(d => d.placeId));
-
-  const apolloOnly = apolloItems.filter(a =>
-    !domNameSet.has(a.placeName) &&
-    !(a.placeId && domIdSet.has(a.placeId))
-  );
-
-  if (apolloOnly.length === 0) return [...domAds, ...enriched];
-
-  // Apollo 순서에서 이웃을 찾아 올바른 위치에 삽입
-  const result = [...enriched];
-
-  for (const missing of apolloOnly) {
-    const apolloIdx = apolloItems.findIndex(a =>
-      (a.placeId && a.placeId === missing.placeId) ||
-      a.placeName === missing.placeName
-    );
-
-    // 이전 Apollo 이웃 중 DOM에 있는 항목 찾기
-    let insertAfterIdx = -1;
-    for (let i = apolloIdx - 1; i >= 0; i--) {
-      const neighbor = apolloItems[i];
-      const domIdx = result.findIndex(d =>
-        (d.placeId && neighbor.placeId && d.placeId === neighbor.placeId) ||
-        d.placeName === neighbor.placeName
-      );
-      if (domIdx !== -1) {
-        insertAfterIdx = domIdx;
-        break;
-      }
-    }
-
-    // 삽입
-    result.splice(insertAfterIdx + 1, 0, {
-      placeName: missing.placeName,
-      placeId: missing.placeId,
-      isAd: false,
-    });
-  }
-
-  return [...domAds, ...result];
 }
 
 /**
