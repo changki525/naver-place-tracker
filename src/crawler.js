@@ -146,24 +146,30 @@ async function crawlMobileList(keyword, options) {
       );
       await page.waitForTimeout(2500);
 
-      // 더보기 링크에서 올바른 카테고리 URL 추출
-      const listUrl = await page.evaluate(() => {
+      // 더보기 링크에서 카테고리 추출 → 좌표는 업체 위치로 교체
+      const category = await page.evaluate(() => {
         const links = document.querySelectorAll('a');
         for (const a of links) {
           const href = a.href || '';
           if (href.includes('m.place.naver.com') && href.includes('/list')) {
-            return href;
+            // URL에서 카테고리 추출 (restaurant, hairshop, cafe 등)
+            const match = href.match(/m\.place\.naver\.com\/(\w+)\/list/);
+            return match ? match[1] : null;
           }
         }
         return null;
       });
 
-      if (!listUrl) {
+      if (!category) {
         await context.close().catch(() => {});
         return [];
       }
 
-      // 2단계: 리스트 페이지로 이동
+      // 2단계: 업체 좌표를 포함한 리스트 URL 직접 구성
+      let listUrl = `https://m.place.naver.com/${category}/list?query=${encodeURIComponent(keyword)}`;
+      if (lng && lat) {
+        listUrl += `&x=${lng}&y=${lat}`;
+      }
       await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await page.waitForTimeout(2000);
 
@@ -173,7 +179,7 @@ async function crawlMobileList(keyword, options) {
         await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
         await page.waitForTimeout(600);
         const curCount = await page.evaluate(() =>
-          document.querySelectorAll('li.UEzoS').length
+          document.querySelectorAll('li.UEzoS, li.p0FrU').length
         );
         if (curCount === prevCount && i > 3) break;
         prevCount = curCount;
