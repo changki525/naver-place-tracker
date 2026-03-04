@@ -1,18 +1,36 @@
 /**
- * 네이버 지도 검색 결과 크롤링
+ * 네이버 플레이스 검색 결과 크롤링
  *
- * 순위 정확도: DOM 순서 = 실제 화면 표시 순서 (유일한 정답)
- * - Apollo State 순서 ≠ DOM 순서 (9번째 항목부터 차이 발생 확인됨)
- * - Apollo/API 인터셉션은 placeId 보충용으로만 사용
+ * 전략: 모바일 리스트 우선 → PC 지도 폴백
  *
- * 속도 최적화:
- * - 이미지/폰트/미디어/광고 리소스 차단
- * - 스크롤 대기 시간 최소화
+ * 1차) m.place.naver.com/{category}/list — 모바일 리스트
+ *   - 100개 한 번에 로드 (스크롤/페이지네이션 불필요)
+ *   - iframe 없음 (직접 DOM 접근)
+ *   - href에서 placeId 직접 추출
+ *   - 카테고리 자동 감지: m.search → 더보기 링크에서 추출
+ *
+ * 2차) map.naver.com/p/search — PC 지도 (폴백)
+ *   - 모바일 리스트 실패 시 사용
+ *   - 페이지당 ~54개 오가닉, 최대 5페이지 = ~200개
+ *   - searchIframe + DOM 스크롤 필요
+ *
+ * 봇 탐지 우회: playwright-extra + stealth 플러그인
  */
-import { chromium } from 'playwright';
+import { chromium as _chromium, devices } from 'playwright';
 
-const DEFAULT_UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+// Stealth 플러그인 (설치된 경우에만 사용)
+let chromium = _chromium;
+try {
+  const { chromium: stealthChromium } = await import('playwright-extra');
+  const StealthPlugin = (await import('puppeteer-extra-plugin-stealth')).default;
+  stealthChromium.use(StealthPlugin());
+  chromium = stealthChromium;
+  console.log('[crawler] stealth 플러그인 활성화');
+} catch {
+  console.log('[crawler] stealth 미설치, 기본 playwright 사용');
+}
+
+const MOBILE_DEVICE = devices['iPhone 13'];
 
 // ─── 브라우저 싱글턴 ───
 let _browser = null;
@@ -70,13 +88,238 @@ async function createLightPage(context) {
   return page;
 }
 
+// ═══════════════════════════════════════════════════
+// 메인 크롤링 함수
+// ═══════════════════════════════════════════════════
+
 /**
- * 네이버 지도에서 키워드 검색 후 플레이스 결과 목록을 반환한다.
- *
- * DOM 순서 = 실제 화면 순서 = 정확한 순위
- * Apollo/API 인터셉션 = placeId 보충용
+ * 네이버에서 키워드 검색 후 플레이스 결과 목록을 반환한다.
+ * 모바일 리스트 우선, 실패 시 PC 지도 폴백.
  */
 export async function crawlNaverPlace(keyword, options = {}) {
+  const { maxRank = 200, headless = true, lng = null, lat = null } = options;
+
+  // 1차: 모바일 리스트 시도
+  const mobileResults = await crawlMobileList(keyword, { maxRank, headless, lng, lat });
+  if (mobileResults.length > 0) {
+    console.log(`[crawl] ${keyword}: ${mobileResults.length}건 (모바일)`);
+    return mobileResults;
+  }
+
+  // 2차: PC 지도 폴백
+  console.log(`[crawl] ${keyword}: 모바일 실패 → PC 지도 폴백`);
+  const pcResults = await crawlPcMap(keyword, { maxRank, headless, lng, lat });
+  console.log(`[crawl] ${keyword}: ${pcResults.length}건 (PC)`);
+  return pcResults;
+}
+
+// ═══════════════════════════════════════════════════
+// 모바일 리스트 크롤링
+// ═══════════════════════════════════════════════════
+
+/**
+ * 모바일 네이버 검색 → 플레이스 리스트 페이지에서 수집.
+ * m.search.naver.com → 더보기 링크 → m.place.naver.com/{category}/list
+ */
+async function crawlMobileList(keyword, options) {
+  const { maxRank = 200, headless = true, lng = null, lat = null } = options;
+
+  for (let retry = 0; retry < 2; retry++) {
+    let context = null;
+    try {
+      const browser = await getBrowser(headless);
+      context = await browser.newContext({
+        ...MOBILE_DEVICE,
+        locale: 'ko-KR',
+        timezoneId: 'Asia/Seoul',
+        ...(lng && lat ? {
+          geolocation: { longitude: parseFloat(lng), latitude: parseFloat(lat) },
+          permissions: ['geolocation'],
+        } : {}),
+      });
+      const page = await createLightPage(context);
+
+      // 1단계: 모바일 네이버 검색 → 더보기 링크 URL 추출
+      await page.goto(
+        `https://m.search.naver.com/search.naver?query=${encodeURIComponent(keyword)}&where=m`,
+        { waitUntil: 'domcontentloaded', timeout: 30000 }
+      );
+      await page.waitForTimeout(2500);
+
+      // 더보기 링크에서 올바른 카테고리 URL 추출
+      const listUrl = await page.evaluate(() => {
+        const links = document.querySelectorAll('a');
+        for (const a of links) {
+          const href = a.href || '';
+          if (href.includes('m.place.naver.com') && href.includes('/list')) {
+            return href;
+          }
+        }
+        return null;
+      });
+
+      if (!listUrl) {
+        await context.close().catch(() => {});
+        return [];
+      }
+
+      // 2단계: 리스트 페이지로 이동
+      await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.waitForTimeout(2000);
+
+      // 스크롤로 전체 로드 확인
+      let prevCount = 0;
+      for (let i = 0; i < 15; i++) {
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await page.waitForTimeout(600);
+        const curCount = await page.evaluate(() =>
+          document.querySelectorAll('li.UEzoS').length
+        );
+        if (curCount === prevCount && i > 3) break;
+        prevCount = curCount;
+      }
+
+      // DOM 수집 — 카테고리별 다른 셀렉터 지원
+      // restaurant/cafe: li.UEzoS + span.TYaxT
+      // hairshop/hospital: li.p0FrU + .place_bluelink
+      const items = await page.evaluate(() => {
+        const results = [];
+        const seenSet = new Set();
+
+        // 방법 1: li.UEzoS (맛집/카페 등)
+        const lis1 = document.querySelectorAll('li.UEzoS');
+        for (const li of lis1) {
+          const nameEl = li.querySelector('span.TYaxT');
+          if (!nameEl) continue;
+          const placeName = nameEl.textContent?.trim() || '';
+          if (!placeName || seenSet.has(placeName)) continue;
+          seenSet.add(placeName);
+
+          const isAd = !!(
+            li.querySelector('.cZnHG') ||
+            li.querySelector('[class*="icon_ad"]') ||
+            (li.getAttribute('data-laim-exp-id') || '').includes('*e')
+          );
+
+          let placeId = null;
+          const link = li.querySelector('a[href*="/place/"], a[href*="/restaurant/"], a[href*="/cafe/"], a[href*="/hairshop/"], a[href*="/hospital/"]');
+          if (link) {
+            const m = link.href.match(/\/(\d{5,})/);
+            if (m) placeId = m[1];
+          }
+
+          results.push({ placeName, isAd, placeId });
+        }
+
+        // 방법 2: li.p0FrU (미용실/병원 등 — UEzoS가 없을 때)
+        if (results.length === 0) {
+          const lis2 = document.querySelectorAll('li.p0FrU');
+          for (const li of lis2) {
+            // place_bluelink에서 업체명 추출
+            const bluelink = li.querySelector('.place_bluelink');
+            if (!bluelink) continue;
+            // 텍스트에서 업체명만 추출 (뒤의 태그/뱃지 텍스트 제거)
+            const rawText = bluelink.textContent?.trim() || '';
+            // 첫 번째 자식 텍스트 노드가 업체명
+            let placeName = '';
+            for (const child of bluelink.childNodes) {
+              if (child.nodeType === 3) { // TEXT_NODE
+                const t = child.textContent?.trim();
+                if (t) { placeName = t; break; }
+              }
+            }
+            if (!placeName) {
+              // span 등에서 추출
+              const firstChild = bluelink.querySelector('span, strong');
+              placeName = firstChild?.textContent?.trim() || rawText.split(/네이버|예약|쿠폰|톡톡/)[0]?.trim() || '';
+            }
+            if (!placeName || seenSet.has(placeName)) continue;
+            seenSet.add(placeName);
+
+            // 광고 판별
+            const isAd = !!(
+              li.textContent?.includes('광고') &&
+              (li.querySelector('[class*="ad"]') || li.querySelector('[class*="Ad"]') ||
+               li.textContent?.match(/^.*광고/) )
+            );
+
+            // placeId
+            let placeId = null;
+            const link = li.querySelector('a[href*="/hairshop/"], a[href*="/hospital/"], a[href*="/place/"], a[href*="/restaurant/"]');
+            if (link) {
+              const m = link.href.match(/\/(\d{5,})/);
+              if (m) placeId = m[1];
+            }
+
+            results.push({ placeName, isAd, placeId });
+          }
+        }
+
+        return results;
+      });
+
+      await context.close().catch(() => {});
+
+      if (items.length === 0) return [];
+
+      // 중복 제거 + 오가닉 필터
+      const results = [];
+      let organicCount = 0;
+      const seenIds = new Set();
+      const seenNames = new Set();
+
+      for (const item of items) {
+        if (organicCount >= maxRank) break;
+
+        const idKey = item.placeId || null;
+        const nameKey = item.placeName;
+        if ((idKey && seenIds.has(idKey)) || seenNames.has(nameKey)) continue;
+        if (idKey) seenIds.add(idKey);
+        seenNames.add(nameKey);
+
+        if (!item.isAd) {
+          organicCount++;
+          results.push({
+            rank: organicCount,
+            placeId: item.placeId || null,
+            placeName: item.placeName,
+          });
+        }
+      }
+
+      return results;
+    } catch (err) {
+      if (context) await context.close().catch(() => {});
+      const msg = err.message || '';
+      if (msg.includes('closed') || msg.includes('crashed') || msg.includes('disconnected')) {
+        if (_browser) {
+          await _browser.close().catch(() => {});
+          _browser = null;
+        }
+        if (retry === 0) {
+          await new Promise(r => setTimeout(r, 1000));
+          continue;
+        }
+      }
+      console.error(`[crawl-mobile] ${keyword} 실패:`, msg);
+      return [];
+    }
+  }
+  return [];
+}
+
+// ═══════════════════════════════════════════════════
+// PC 지도 크롤링 (폴백)
+// ═══════════════════════════════════════════════════
+
+const DEFAULT_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+/**
+ * PC 네이버 지도에서 키워드 검색 후 플레이스 결과 목록을 반환한다.
+ * DOM 순서 = 실제 화면 순서 = 정확한 순위.
+ */
+async function crawlPcMap(keyword, options) {
   const { maxRank = 200, headless = true, lng = null, lat = null } = options;
 
   for (let retry = 0; retry < 2; retry++) {
@@ -90,7 +333,7 @@ export async function crawlNaverPlace(keyword, options = {}) {
       });
       const page = await createLightPage(context);
 
-      // allSearch API 인터셉션 — placeId 보충용
+      // API 인터셉션 — placeId 보충용
       const apiItems = [];
       page.on('response', async (response) => {
         if (response.url().includes('api/search/allSearch')) {
@@ -99,17 +342,13 @@ export async function crawlNaverPlace(keyword, options = {}) {
             const list = data?.result?.place?.list;
             if (Array.isArray(list)) {
               for (const item of list) {
-                apiItems.push({
-                  placeId: String(item.id),
-                  placeName: item.name,
-                });
+                apiItems.push({ placeId: String(item.id), placeName: item.name });
               }
             }
           } catch { /* 무시 */ }
         }
       });
 
-      // 네이버 지도 검색 페이지 접속
       let searchUrl = `https://map.naver.com/p/search/${encodeURIComponent(keyword)}`;
       if (lng && lat) {
         searchUrl += `?c=${lng},${lat},15,0,0,0,dh`;
@@ -139,10 +378,10 @@ export async function crawlNaverPlace(keyword, options = {}) {
         return [];
       }
 
-      // Apollo State에서 placeId 맵 구축 (보충용)
+      // Apollo placeId 맵
       const apolloIdMap = await buildApolloIdMap(searchFrame);
 
-      // DOM 기반 수집 루프
+      // DOM 수집 루프
       const results = [];
       let organicCount = 0;
       let currentPage = 1;
@@ -151,53 +390,45 @@ export async function crawlNaverPlace(keyword, options = {}) {
       const seenNames = new Set();
 
       while (organicCount < maxRank && currentPage <= MAX_PAGES) {
-        // 스크롤하여 전체 DOM 항목 로드
         await scrollToBottom(searchFrame);
+        const domItems = await collectPcDomItems(searchFrame);
 
-        // DOM 수집 (실제 화면 순서 = 정확한 순위)
-        const domItems = await collectDomItems(searchFrame);
-
-        // placeId 보충: Apollo → API 인터셉션
+        // placeId 보충
         for (const item of domItems) {
           if (!item.placeId) {
-            // Apollo에서 이름으로 보충
             const apolloId = apolloIdMap.get(item.placeName);
             if (apolloId) {
               item.placeId = apolloId;
             } else {
-              // API 인터셉션 데이터에서 보충
               const apiMatch = apiItems.find(a => a.placeName === item.placeName);
               if (apiMatch) item.placeId = apiMatch.placeId;
             }
           }
         }
 
-        // 중복 제거 + 수집 (광고는 maxRank 카운트 제외)
         for (const item of domItems) {
           if (organicCount >= maxRank) break;
-
           const idKey = item.placeId || null;
           const nameKey = item.placeName;
           if ((idKey && seenIds.has(idKey)) || seenNames.has(nameKey)) continue;
           if (idKey) seenIds.add(idKey);
           seenNames.add(nameKey);
 
-          results.push({
-            rank: results.length + 1,
-            placeId: item.placeId || null,
-            placeName: item.placeName,
-            isAd: item.isAd,
-          });
-          if (!item.isAd) organicCount++;
+          if (!item.isAd) {
+            organicCount++;
+            results.push({
+              rank: organicCount,
+              placeId: item.placeId || null,
+              placeName: item.placeName,
+            });
+          }
         }
 
         if (organicCount >= maxRank) break;
-
         const hasNext = await clickNextPage(searchFrame, currentPage + 1);
         if (!hasNext) break;
 
         currentPage++;
-        // 페이지 전환 후 DOM 갱신 대기
         await page.waitForTimeout(2000);
         for (let i = 0; i < 10; i++) {
           await page.waitForTimeout(300);
@@ -212,14 +443,7 @@ export async function crawlNaverPlace(keyword, options = {}) {
       }
 
       await context.close().catch(() => {});
-
-      const organicResults = results.filter(r => !r.isAd);
-      console.log(`[crawl] ${keyword}: ${organicResults.length}건 수집 (${currentPage}페이지)`);
-      return organicResults.map((r, i) => ({
-        rank: i + 1,
-        placeId: r.placeId,
-        placeName: r.placeName,
-      }));
+      return results;
     } catch (err) {
       if (context) await context.close().catch(() => {});
       const msg = err.message || '';
@@ -233,21 +457,20 @@ export async function crawlNaverPlace(keyword, options = {}) {
           continue;
         }
       }
-      console.error(`[crawl] ${keyword} 실패 (retry=${retry}):`, msg);
+      console.error(`[crawl-pc] ${keyword} 실패:`, msg);
       return [];
     }
   }
   return [];
 }
 
-/**
- * 스크롤하여 전체 DOM 항목 로드.
- * 리소스 차단 덕에 빠르게 완료됨.
- */
+// ═══════════════════════════════════════════════════
+// PC 지도 헬퍼 함수들
+// ═══════════════════════════════════════════════════
+
 async function scrollToBottom(frame) {
   let prevCount = 0;
   let stableCount = 0;
-
   for (let i = 0; i < 20; i++) {
     try {
       const count = await frame.evaluate(() => {
@@ -255,7 +478,6 @@ async function scrollToBottom(frame) {
         if (sc) sc.scrollTop = sc.scrollHeight;
         return document.querySelectorAll('li.UEzoS').length;
       });
-
       if (count === prevCount) {
         stableCount++;
         if (stableCount >= 3) break;
@@ -263,17 +485,11 @@ async function scrollToBottom(frame) {
         stableCount = 0;
       }
       prevCount = count;
-    } catch {
-      break;
-    }
+    } catch { break; }
     await new Promise(r => setTimeout(r, 600));
   }
 }
 
-/**
- * Apollo State에서 placeName → placeId 맵을 구축한다 (보충용).
- * DOM의 placeId가 없는 항목에 대해 이름 매칭으로 보충.
- */
 async function buildApolloIdMap(frame) {
   try {
     const pairs = await frame.evaluate(() => {
@@ -281,16 +497,13 @@ async function buildApolloIdMap(frame) {
       if (!apollo) return [];
       const rq = apollo['ROOT_QUERY'];
       if (!rq) return [];
-
       const listKey = Object.keys(rq).find(
         k => k.includes('List') && !k.includes('Filter') && !k.includes('__typename') &&
              (k.includes('"display":70') || k.includes('"display":50'))
       );
       if (!listKey) return [];
-
       const listData = rq[listKey];
       if (!listData?.items) return [];
-
       return listData.items.map(entry => {
         const ref = entry?.__ref;
         if (!ref) return null;
@@ -305,29 +518,22 @@ async function buildApolloIdMap(frame) {
   }
 }
 
-/**
- * DOM에서 업체 목록을 수집한다.
- * 순서 = 실제 화면 표시 순서 (정확한 순위).
- */
-async function collectDomItems(frame) {
+async function collectPcDomItems(frame) {
   return frame.evaluate(() => {
     const items = [];
     const lis = document.querySelectorAll('li.UEzoS');
-
     for (const li of lis) {
       const nameEl = li.querySelector('span.TYaxT');
       if (!nameEl) continue;
       const placeName = nameEl.textContent?.trim() || '';
       if (!placeName) continue;
 
-      // 광고 판별
       const isAd = !!(
         li.querySelector('.cZnHG') ||
         li.querySelector('[class*="icon_ad"]') ||
-        li.getAttribute('data-laim-exp-id')?.includes('*e')
+        (li.getAttribute('data-laim-exp-id') || '').includes('*e')
       );
 
-      // React Fiber에서 placeId 추출
       let placeId = null;
       try {
         const fiberKey = Object.keys(li).find(k =>
@@ -352,20 +558,15 @@ async function collectDomItems(frame) {
 
       items.push({ placeName, isAd, placeId });
     }
-
     return items;
   });
 }
 
-/**
- * 페이지 네비게이션에서 특정 페이지 버튼을 클릭한다.
- */
 async function clickNextPage(frame, pageNum) {
   try {
     return await frame.evaluate((targetPage) => {
       const nav = document.querySelector('.zRM9F');
       if (!nav) return false;
-
       const buttons = nav.querySelectorAll('a.mBN2s');
       for (const btn of buttons) {
         if (btn.textContent?.trim() === String(targetPage)) {
@@ -373,13 +574,11 @@ async function clickNextPage(frame, pageNum) {
           return true;
         }
       }
-
       const nextBtn = nav.querySelector('a.eUTV2:last-child');
       if (nextBtn && !nextBtn.getAttribute('aria-disabled')) {
         nextBtn.click();
         return true;
       }
-
       return false;
     }, pageNum);
   } catch {
@@ -387,14 +586,16 @@ async function clickNextPage(frame, pageNum) {
   }
 }
 
+// ═══════════════════════════════════════════════════
+// 유틸리티 함수들
+// ═══════════════════════════════════════════════════
+
 /**
  * Place ID로 업체명을 가져온다.
- * 여러 카테고리 타입을 시도하고, 실패 시 Playwright 폴백.
  */
 export async function fetchPlaceName(placeId) {
   const PLACE_TYPES = ['restaurant', 'cafe', 'place', 'hairshop', 'hospital', 'accommodation'];
 
-  // 1차: HTTP — 여러 카테고리 타입 시도
   for (const type of PLACE_TYPES) {
     try {
       const res = await fetch(`https://pcmap.place.naver.com/${type}/${placeId}/home`, {
@@ -421,7 +622,6 @@ export async function fetchPlaceName(placeId) {
     } catch { /* 다음 타입 시도 */ }
   }
 
-  // 2차: Playwright — map entry URL 사용 (카테고리 자동 감지)
   let context = null;
   try {
     const browser = await getBrowser(true);
@@ -436,7 +636,6 @@ export async function fetchPlaceName(placeId) {
       timeout: 15000,
     });
 
-    // place iframe 대기 후 이름 추출
     let name = null;
     for (let i = 0; i < 15; i++) {
       await page.waitForTimeout(500);
