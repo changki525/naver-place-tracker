@@ -1,15 +1,13 @@
 /**
  * 네이버 지도 검색 결과 크롤링
  *
- * 전략: Apollo State(SSR) 기반 + API 인터셉션 보충 + DOM 광고 감지
- *
- * - Apollo State: 페이지당 70개 항목, SSR로 즉시 사용 가능 (스크롤 불필요)
- * - allSearch API: 인터셉션으로 보충 데이터 수집 (placeId 보강)
- * - DOM: 광고 판별용 최소한의 체크만 수행
+ * 순위 정확도: DOM 순서 = 실제 화면 표시 순서 (유일한 정답)
+ * - Apollo State 순서 ≠ DOM 순서 (9번째 항목부터 차이 발생 확인됨)
+ * - Apollo/API 인터셉션은 placeId 보충용으로만 사용
  *
  * 속도 최적화:
  * - 이미지/폰트/미디어/광고 리소스 차단
- * - 스크롤 제거 → Apollo State 직접 접근
+ * - 스크롤 대기 시간 최소화
  */
 import { chromium } from 'playwright';
 
@@ -75,7 +73,8 @@ async function createLightPage(context) {
 /**
  * 네이버 지도에서 키워드 검색 후 플레이스 결과 목록을 반환한다.
  *
- * 전략: Apollo State(SSR) 기반 + allSearch API 인터셉션 + DOM 광고 감지
+ * DOM 순서 = 실제 화면 순서 = 정확한 순위
+ * Apollo/API 인터셉션 = placeId 보충용
  */
 export async function crawlNaverPlace(keyword, options = {}) {
   const { maxRank = 200, headless = true, lng = null, lat = null } = options;
@@ -91,7 +90,7 @@ export async function crawlNaverPlace(keyword, options = {}) {
       });
       const page = await createLightPage(context);
 
-      // allSearch API 인터셉션 — 보충 데이터 수집
+      // allSearch API 인터셉션 — placeId 보충용
       const apiItems = [];
       page.on('response', async (response) => {
         if (response.url().includes('api/search/allSearch')) {
@@ -103,7 +102,6 @@ export async function crawlNaverPlace(keyword, options = {}) {
                 apiItems.push({
                   placeId: String(item.id),
                   placeName: item.name,
-                  isAd: item.isAdEntry === true,
                 });
               }
             }
@@ -118,7 +116,7 @@ export async function crawlNaverPlace(keyword, options = {}) {
       }
       await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-      // searchIframe 대기 (Apollo State가 로드될 때까지)
+      // searchIframe 대기
       let searchFrame = null;
       for (let attempt = 0; attempt < 25; attempt++) {
         await page.waitForTimeout(400);
@@ -128,20 +126,10 @@ export async function crawlNaverPlace(keyword, options = {}) {
         );
         if (searchFrame) {
           try {
-            const hasApollo = await searchFrame.evaluate(() => {
-              const apollo = window.__APOLLO_STATE__;
-              if (!apollo || !apollo['ROOT_QUERY']) return false;
-              return Object.keys(apollo['ROOT_QUERY']).some(
-                k => k.includes('List') && !k.includes('Filter') &&
-                     (k.includes('"display":70') || k.includes('"display":50'))
-              );
-            });
-            if (hasApollo) break;
-            // Apollo 없으면 DOM이라도 있는지 확인
-            const hasDom = await searchFrame.evaluate(() =>
+            const hasResults = await searchFrame.evaluate(() =>
               document.querySelectorAll('li.UEzoS').length > 0
             );
-            if (hasDom && attempt >= 10) break; // Apollo 포기, DOM 사용
+            if (hasResults) break;
           } catch { /* 프레임 준비 안됨 */ }
         }
       }
@@ -151,9 +139,10 @@ export async function crawlNaverPlace(keyword, options = {}) {
         return [];
       }
 
-      // 수집 루프
-      // 페이지 1: Apollo State (SSR, 70개, 스크롤 불필요) + DOM 광고 감지
-      // 페이지 2+: DOM 수집 (Apollo는 페이지 전환 시 갱신되지 않음)
+      // Apollo State에서 placeId 맵 구축 (보충용)
+      const apolloIdMap = await buildApolloIdMap(searchFrame);
+
+      // DOM 기반 수집 루프
       const results = [];
       let organicCount = 0;
       let currentPage = 1;
@@ -162,47 +151,29 @@ export async function crawlNaverPlace(keyword, options = {}) {
       const seenNames = new Set();
 
       while (organicCount < maxRank && currentPage <= MAX_PAGES) {
-        let pageItems;
+        // 스크롤하여 전체 DOM 항목 로드
+        await scrollToBottom(searchFrame);
 
-        if (currentPage === 1) {
-          // ── 페이지 1: Apollo State 우선 ──
-          const apolloItems = await collectApolloItems(searchFrame);
-          const adInfo = await collectAdInfo(searchFrame);
+        // DOM 수집 (실제 화면 순서 = 정확한 순위)
+        const domItems = await collectDomItems(searchFrame);
 
-          if (apolloItems.length > 0) {
-            // Apollo 기반 + DOM 광고 정보 병합
-            pageItems = apolloItems.map(item => {
-              const domMatch = adInfo.find(d => d.placeName === item.placeName);
-              const isAd = domMatch ? domMatch.isAd : false;
-              return { ...item, isAd };
-            });
-            // API 인터셉션 데이터로 placeId 보충
-            for (const item of pageItems) {
-              if (!item.placeId) {
-                const apiMatch = apiItems.find(a => a.placeName === item.placeName);
-                if (apiMatch) item.placeId = apiMatch.placeId;
-              }
-            }
-          } else {
-            // Apollo 없으면 DOM 폴백
-            await scrollToBottom(searchFrame);
-            pageItems = await collectDomItems(searchFrame);
-          }
-        } else {
-          // ── 페이지 2+: DOM 수집 (Apollo는 갱신 안 됨) ──
-          await scrollToBottom(searchFrame);
-          pageItems = await collectDomItems(searchFrame);
-          // API 인터셉션 데이터로 placeId 보충
-          for (const item of pageItems) {
-            if (!item.placeId) {
+        // placeId 보충: Apollo → API 인터셉션
+        for (const item of domItems) {
+          if (!item.placeId) {
+            // Apollo에서 이름으로 보충
+            const apolloId = apolloIdMap.get(item.placeName);
+            if (apolloId) {
+              item.placeId = apolloId;
+            } else {
+              // API 인터셉션 데이터에서 보충
               const apiMatch = apiItems.find(a => a.placeName === item.placeName);
               if (apiMatch) item.placeId = apiMatch.placeId;
             }
           }
         }
 
-        // 중복 제거 + 수집
-        for (const item of pageItems) {
+        // 중복 제거 + 수집 (광고는 maxRank 카운트 제외)
+        for (const item of domItems) {
           if (organicCount >= maxRank) break;
 
           const idKey = item.placeId || null;
@@ -226,9 +197,8 @@ export async function crawlNaverPlace(keyword, options = {}) {
         if (!hasNext) break;
 
         currentPage++;
-        // 페이지 전환 후 DOM 로드 대기
+        // 페이지 전환 후 DOM 갱신 대기
         await page.waitForTimeout(2000);
-        // DOM이 새 페이지 항목으로 갱신될 때까지 대기
         for (let i = 0; i < 10; i++) {
           await page.waitForTimeout(300);
           try {
@@ -301,35 +271,42 @@ async function scrollToBottom(frame) {
 }
 
 /**
- * DOM에서 광고 판별 정보만 수집한다.
- * Apollo State에는 광고 정보가 없으므로 DOM에서만 확인.
+ * Apollo State에서 placeName → placeId 맵을 구축한다 (보충용).
+ * DOM의 placeId가 없는 항목에 대해 이름 매칭으로 보충.
  */
-async function collectAdInfo(frame) {
+async function buildApolloIdMap(frame) {
   try {
-    return await frame.evaluate(() => {
-      const items = [];
-      const lis = document.querySelectorAll('li.UEzoS');
-      for (const li of lis) {
-        const nameEl = li.querySelector('span.TYaxT');
-        if (!nameEl) continue;
-        const placeName = nameEl.textContent?.trim() || '';
-        if (!placeName) continue;
-        const isAd = !!(
-          li.querySelector('.cZnHG') ||
-          li.querySelector('[class*="icon_ad"]') ||
-          li.getAttribute('data-laim-exp-id')?.includes('*e')
-        );
-        items.push({ placeName, isAd });
-      }
-      return items;
+    const pairs = await frame.evaluate(() => {
+      const apollo = window.__APOLLO_STATE__;
+      if (!apollo) return [];
+      const rq = apollo['ROOT_QUERY'];
+      if (!rq) return [];
+
+      const listKey = Object.keys(rq).find(
+        k => k.includes('List') && !k.includes('Filter') && !k.includes('__typename') &&
+             (k.includes('"display":70') || k.includes('"display":50'))
+      );
+      if (!listKey) return [];
+
+      const listData = rq[listKey];
+      if (!listData?.items) return [];
+
+      return listData.items.map(entry => {
+        const ref = entry?.__ref;
+        if (!ref) return null;
+        const item = apollo[ref];
+        if (!item || !item.name || !item.id) return null;
+        return [item.name, String(item.id)];
+      }).filter(Boolean);
     });
+    return new Map(pairs);
   } catch {
-    return [];
+    return new Map();
   }
 }
 
 /**
- * DOM에서 업체 목록을 수집한다 (Apollo 없을 때 폴백용).
+ * DOM에서 업체 목록을 수집한다.
  * 순서 = 실제 화면 표시 순서 (정확한 순위).
  */
 async function collectDomItems(frame) {
@@ -378,44 +355,6 @@ async function collectDomItems(frame) {
 
     return items;
   });
-}
-
-/**
- * Apollo State에서 결과 리스트를 추출한다.
- */
-async function collectApolloItems(frame) {
-  try {
-    return await frame.evaluate(() => {
-      const apollo = window.__APOLLO_STATE__;
-      if (!apollo) return [];
-      const rq = apollo['ROOT_QUERY'];
-      if (!rq) return [];
-
-      // 모든 카테고리 지원: restaurantList, cafeList, placeList, beautyList 등
-      const listKey = Object.keys(rq).find(
-        k => k.includes('List') && !k.includes('Filter') && !k.includes('__typename') &&
-             (k.includes('"display":70') || k.includes('"display":50'))
-      );
-      if (!listKey) return [];
-
-      const listData = rq[listKey];
-      if (!listData?.items) return [];
-
-      return listData.items.map(entry => {
-        const ref = entry?.__ref;
-        if (!ref) return null;
-        const item = apollo[ref];
-        if (!item || !item.name) return null;
-        return {
-          placeName: item.name,
-          placeId: item.id ? String(item.id) : null,
-          isAd: false,
-        };
-      }).filter(Boolean);
-    });
-  } catch {
-    return [];
-  }
 }
 
 /**
