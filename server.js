@@ -8,9 +8,10 @@ import { readFile } from 'fs/promises';
 import { dirname, resolve, extname } from 'path';
 import { fileURLToPath } from 'url';
 
-import { crawlNaverPlace, fetchPlaceName, fetchPlaceCoords, resolveRedirectUrl, closeBrowser } from './src/crawler.js';
+import { crawlNaverPlace, fetchPlaceName, resolveRedirectUrl, closeBrowser } from './src/crawler.js';
 import { extractPlaceId, parseRankFromResults } from './src/parser.js';
 import { loadHistory, saveResult, getPreviousRank } from './src/history.js';
+import { getSearchVolume, isConfigured as isSearchVolumeConfigured } from './src/searchVolume.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = resolve(__dirname, 'public');
@@ -69,6 +70,23 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // GET /api/search-volume?keywords=키워드1,키워드2
+  if (path === '/api/search-volume' && req.method === 'GET') {
+    const kws = url.searchParams.get('keywords');
+    if (!kws) {
+      sendJson(res, 400, { error: 'keywords 파라미터 필요' });
+      return;
+    }
+    try {
+      const keywords = kws.split(',').map(k => k.trim()).filter(Boolean);
+      const volumes = await getSearchVolume(keywords);
+      sendJson(res, 200, { configured: isSearchVolumeConfigured(), volumes: volumes || {} });
+    } catch (err) {
+      sendJson(res, 500, { error: err.message });
+    }
+    return;
+  }
+
   // POST /api/check
   if (path === '/api/check' && req.method === 'POST') {
     try {
@@ -91,22 +109,7 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      // URL에서 좌표 추출 (업체 위치 기반 검색용)
-      const lngMatch = resolvedUrl.match(/lng=([\d.]+)/);
-      const latMatch = resolvedUrl.match(/lat=([\d.]+)/);
-      let lng = lngMatch ? lngMatch[1] : null;
-      let lat = latMatch ? latMatch[1] : null;
-
-      // URL에 좌표가 없으면 ?c=lng,lat 형식도 시도
-      if (!lng) {
-        const cMatch = resolvedUrl.match(/[?&]c=([\d.]+),([\d.]+)/);
-        if (cMatch) {
-          lng = cMatch[1];
-          lat = cMatch[2];
-        }
-      }
-
-      // 업체명 조회 (좌표 추출에도 필요하므로 먼저 실행)
+      // 업체명 조회
       const history = await loadHistory();
       let placeName = history.places?.[placeId]?.placeName || null;
       if (!placeName || placeName === placeId) {
@@ -115,25 +118,14 @@ const server = createServer(async (req, res) => {
         } catch { /* 무시 */ }
       }
 
-      // 여전히 좌표가 없으면 업체명으로 검색하여 좌표 추출
-      if (!lng && placeName) {
-        try {
-          const coords = await fetchPlaceCoords(placeId, placeName);
-          if (coords.lng && coords.lat) {
-            lng = coords.lng;
-            lat = coords.lat;
-          }
-        } catch { /* 좌표 없이 진행 */ }
-      }
-
-      // 좌표/업체명 조회 후 브라우저 완전 종료 → 메모리 해제
+      // 업체명 조회 후 브라우저 완전 종료 → 메모리 해제
       await closeBrowser();
 
       const results = [];
 
       for (const keyword of keywords) {
         try {
-          const crawlResults = await crawlNaverPlace(keyword, { maxRank, lng, lat });
+          const crawlResults = await crawlNaverPlace(keyword, { maxRank });
           const rankResult = parseRankFromResults(crawlResults, placeId, placeName);
           const prevRank = getPreviousRank(history, placeId, keyword);
 

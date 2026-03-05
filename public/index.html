@@ -891,6 +891,7 @@
     renderPlaceTable();
     renderFavQuick();
     updateFavBtn();
+    loadSearchVolumes();
   }
 
   async function loadHistoryData() {
@@ -898,6 +899,32 @@
       const resp = await fetch('/api/history');
       historyData = await resp.json();
     } catch { historyData = { places: {} }; }
+  }
+
+  // ─── 검색량 로드 ───
+  async function loadSearchVolumes() {
+    const allKws = new Set();
+    for (const place of Object.values(historyData?.places || {})) {
+      for (const kw of Object.keys(place.keywords || {})) allKws.add(kw);
+    }
+    if (allKws.size === 0) return;
+
+    try {
+      const resp = await fetch(`/api/search-volume?keywords=${encodeURIComponent([...allKws].join(','))}`);
+      const data = await resp.json();
+      if (!data.configured) return; // API 미설정
+
+      for (const [kw, vol] of Object.entries(data.volumes || {})) {
+        const cells = document.querySelectorAll(`[data-sv-kw="${CSS.escape(kw)}"]`);
+        cells.forEach(cell => {
+          const pc = vol.pc !== null ? Number(vol.pc).toLocaleString() : '-';
+          const mb = vol.mobile !== null ? Number(vol.mobile).toLocaleString() : '-';
+          cell.innerHTML = `<span style="font-size:11px;white-space:nowrap"><span style="color:var(--blue)">PC ${pc}</span><br><span style="color:var(--green)">모바일 ${mb}</span></span>`;
+        });
+      }
+    } catch (err) {
+      console.log('검색량 로드 실패:', err);
+    }
   }
 
   // ─── 키워드 태그 ───
@@ -1126,7 +1153,7 @@
         </div>
         <div class="card-body" style="padding:0">
           <table class="rank-table">
-            <thead><tr><th>키워드</th><th style="text-align:center">현재 순위</th><th style="text-align:center">변동</th><th style="text-align:center">이전 순위</th></tr></thead>
+            <thead><tr><th>키워드</th><th style="text-align:center">월 검색량</th><th style="text-align:center">현재 순위</th><th style="text-align:center">변동</th><th>과거 순위</th></tr></thead>
             <tbody>`;
 
       for (const [kw, data] of kwEntries) {
@@ -1148,13 +1175,32 @@
           else if (diff < 0) changeHtml = `<span class="rank-change down">▼ ${Math.abs(diff)}</span>`;
         }
 
-        const prevText = prevRank ? `${prevRank}위` : (prev ? '순위권 밖' : '-');
+        // 과거 순위 (최근 5건, 날짜별)
+        const pastRecords = (data.records || []).slice(1);
+        const pastDayMap = new Map();
+        for (const r of pastRecords) {
+          if (pastDayMap.size >= 5) break;
+          const d = new Date(r.timestamp);
+          const dayKey = `${d.getMonth()+1}/${d.getDate()}`;
+          if (!pastDayMap.has(dayKey)) pastDayMap.set(dayKey, r.rank);
+        }
+        let pastHtml = '';
+        if (pastDayMap.size > 0) {
+          pastHtml = [...pastDayMap.entries()].map(([day, r]) => {
+            if (r === null) return `<span style="display:inline-flex;align-items:center;gap:2px;margin-right:8px"><span style="font-size:11px;color:var(--text-light)">${day}</span> <span style="color:var(--text-light);font-size:12px">-</span></span>`;
+            const c = r <= 3 ? 'var(--green)' : r <= 10 ? 'var(--yellow)' : 'var(--text)';
+            return `<span style="display:inline-flex;align-items:center;gap:2px;margin-right:8px"><span style="font-size:11px;color:var(--text-light)">${day}</span> <span style="color:${c};font-weight:700;font-size:13px">${r}위</span></span>`;
+          }).join('');
+        } else {
+          pastHtml = '<span style="color:var(--text-light)">-</span>';
+        }
 
         html += `<tr>
           <td style="font-weight:600">${esc(kw)}</td>
+          <td style="text-align:center" data-sv-kw="${esc(kw)}"><span style="color:var(--text-light);font-size:12px">-</span></td>
           <td style="text-align:center"><span class="rank-cell ${rankClass}">${rankText}</span></td>
           <td style="text-align:center">${changeHtml}</td>
-          <td style="text-align:center;color:var(--text-light)">${prevText}</td>
+          <td style="font-size:13px">${pastHtml}</td>
         </tr>`;
       }
 

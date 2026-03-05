@@ -1,18 +1,17 @@
 /**
  * 네이버 플레이스 검색 결과 크롤링
  *
- * 전략: 모바일 리스트 우선 → PC 지도 폴백
+ * 전략: 네이버 플레이스 리스트 (앱/더보기와 동일한 순위)
  *
- * 1차) m.place.naver.com/{category}/list — 모바일 리스트
- *   - 100개 한 번에 로드 (스크롤/페이지네이션 불필요)
- *   - iframe 없음 (직접 DOM 접근)
- *   - href에서 placeId 직접 추출
+ * 1차) m.place.naver.com/{category}/list — 플레이스 리스트
+ *   - 네이버 앱에서 보는 순위와 동일
+ *   - 100개+ 한 번에 로드
  *   - 카테고리 자동 감지: m.search → 더보기 링크에서 추출
+ *   - 좌표 미주입 (순위 왜곡 방지)
  *
  * 2차) map.naver.com/p/search — PC 지도 (폴백)
- *   - 모바일 리스트 실패 시 사용
+ *   - 플레이스 리스트 실패 시 사용
  *   - 페이지당 ~54개 오가닉, 최대 5페이지 = ~200개
- *   - searchIframe + DOM 스크롤 필요
  *
  * 봇 탐지 우회: playwright-extra + stealth 플러그인
  */
@@ -94,35 +93,39 @@ async function createLightPage(context) {
 
 /**
  * 네이버에서 키워드 검색 후 플레이스 결과 목록을 반환한다.
- * 모바일 리스트 우선, 실패 시 PC 지도 폴백.
+ * 플레이스 리스트 (앱과 동일) → PC 지도 폴백.
  */
 export async function crawlNaverPlace(keyword, options = {}) {
   const { maxRank = 200, headless = true, lng = null, lat = null } = options;
 
-  // 1차: 모바일 리스트 시도
-  const mobileResults = await crawlMobileList(keyword, { maxRank, headless, lng, lat });
-  if (mobileResults.length > 0) {
-    console.log(`[crawl] ${keyword}: ${mobileResults.length}건 (모바일)`);
-    return mobileResults;
+  // 1차: 네이버 플레이스 리스트 (앱/더보기와 동일한 순위)
+  const listResults = await crawlPlaceList(keyword, { maxRank, headless });
+  if (listResults.length > 0) {
+    console.log(`[crawl] ${keyword}: ${listResults.length}건 (플레이스 리스트)`);
+    return listResults;
   }
 
   // 2차: PC 지도 폴백
-  console.log(`[crawl] ${keyword}: 모바일 실패 → PC 지도 폴백`);
+  console.log(`[crawl] ${keyword}: 리스트 실패 → PC 지도 폴백`);
   const pcResults = await crawlPcMap(keyword, { maxRank, headless, lng, lat });
   console.log(`[crawl] ${keyword}: ${pcResults.length}건 (PC)`);
   return pcResults;
 }
 
 // ═══════════════════════════════════════════════════
-// 모바일 리스트 크롤링
+// 네이버 플레이스 리스트 크롤링 (앱/더보기와 동일)
 // ═══════════════════════════════════════════════════
 
 /**
- * 모바일 네이버 검색 → 플레이스 리스트 페이지에서 수집.
- * m.search.naver.com → 더보기 링크 → m.place.naver.com/{category}/list
+ * m.place.naver.com/{category}/list 에서 전체 리스트를 수집한다.
+ * 네이버 앱에서 보는 순위와 동일.
+ * 좌표 미주입 → 순위 왜곡 없음.
+ *
+ * 1단계: m.search.naver.com 검색 → 더보기 링크에서 카테고리 추출
+ * 2단계: m.place.naver.com/{category}/list?query=... 에서 전체 수집
  */
-async function crawlMobileList(keyword, options) {
-  const { maxRank = 200, headless = true, lng = null, lat = null } = options;
+async function crawlPlaceList(keyword, options) {
+  const { maxRank = 200, headless = true } = options;
 
   for (let retry = 0; retry < 2; retry++) {
     let context = null;
@@ -132,29 +135,27 @@ async function crawlMobileList(keyword, options) {
         ...MOBILE_DEVICE,
         locale: 'ko-KR',
         timezoneId: 'Asia/Seoul',
-        ...(lng && lat ? {
-          geolocation: { longitude: parseFloat(lng), latitude: parseFloat(lat) },
-          permissions: ['geolocation'],
-        } : {}),
       });
       const page = await createLightPage(context);
 
-      // 1단계: 모바일 네이버 검색 → 더보기 링크 URL 추출
+      // 1단계: 모바일 검색 → 카테고리 추출
       await page.goto(
-        `https://m.search.naver.com/search.naver?query=${encodeURIComponent(keyword)}&where=m`,
+        `https://m.search.naver.com/search.naver?query=${encodeURIComponent(keyword)}`,
         { waitUntil: 'domcontentloaded', timeout: 30000 }
       );
       await page.waitForTimeout(2500);
 
-      // 더보기 링크에서 카테고리 추출 → 좌표는 업체 위치로 교체
       const category = await page.evaluate(() => {
         const links = document.querySelectorAll('a');
         for (const a of links) {
           const href = a.href || '';
           if (href.includes('m.place.naver.com') && href.includes('/list')) {
-            // URL에서 카테고리 추출 (restaurant, hairshop, cafe 등)
             const match = href.match(/m\.place\.naver\.com\/(\w+)\/list/);
             return match ? match[1] : null;
+          }
+          if (href.includes('m.place.naver.com')) {
+            const match = href.match(/m\.place\.naver\.com\/(\w+)\//);
+            if (match) return match[1];
           }
         }
         return null;
@@ -165,15 +166,13 @@ async function crawlMobileList(keyword, options) {
         return [];
       }
 
-      // 2단계: 업체 좌표를 포함한 리스트 URL 직접 구성
-      let listUrl = `https://m.place.naver.com/${category}/list?query=${encodeURIComponent(keyword)}`;
-      if (lng && lat) {
-        listUrl += `&x=${lng}&y=${lat}`;
-      }
+      // 2단계: 플레이스 리스트 페이지 (좌표 미주입)
+      const listUrl = `https://m.place.naver.com/${category}/list?query=${encodeURIComponent(keyword)}`;
+      console.log(`[crawl-list] ${keyword}: ${category}/list`);
       await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await page.waitForTimeout(2000);
 
-      // 스크롤로 전체 로드 확인
+      // 스크롤로 전체 로드
       let prevCount = 0;
       for (let i = 0; i < 15; i++) {
         await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
@@ -185,14 +184,12 @@ async function crawlMobileList(keyword, options) {
         prevCount = curCount;
       }
 
-      // DOM 수집 — 카테고리별 다른 셀렉터 지원
-      // restaurant/cafe: li.UEzoS + span.TYaxT
-      // hairshop/hospital: li.p0FrU + .place_bluelink
+      // DOM 수집
       const items = await page.evaluate(() => {
         const results = [];
         const seenSet = new Set();
 
-        // 방법 1: li.UEzoS (맛집/카페 등)
+        // li.UEzoS (맛집/카페)
         const lis1 = document.querySelectorAll('li.UEzoS');
         for (const li of lis1) {
           const nameEl = li.querySelector('span.TYaxT');
@@ -213,50 +210,40 @@ async function crawlMobileList(keyword, options) {
             const m = link.href.match(/\/(\d{5,})/);
             if (m) placeId = m[1];
           }
-
           results.push({ placeName, isAd, placeId });
         }
 
-        // 방법 2: li.p0FrU (미용실/병원 등 — UEzoS가 없을 때)
+        // li.p0FrU (미용실/병원)
         if (results.length === 0) {
           const lis2 = document.querySelectorAll('li.p0FrU');
           for (const li of lis2) {
-            // place_bluelink에서 업체명 추출
             const bluelink = li.querySelector('.place_bluelink');
             if (!bluelink) continue;
-            // 텍스트에서 업체명만 추출 (뒤의 태그/뱃지 텍스트 제거)
-            const rawText = bluelink.textContent?.trim() || '';
-            // 첫 번째 자식 텍스트 노드가 업체명
             let placeName = '';
             for (const child of bluelink.childNodes) {
-              if (child.nodeType === 3) { // TEXT_NODE
+              if (child.nodeType === 3) {
                 const t = child.textContent?.trim();
                 if (t) { placeName = t; break; }
               }
             }
             if (!placeName) {
-              // span 등에서 추출
               const firstChild = bluelink.querySelector('span, strong');
-              placeName = firstChild?.textContent?.trim() || rawText.split(/네이버|예약|쿠폰|톡톡/)[0]?.trim() || '';
+              placeName = firstChild?.textContent?.trim() || bluelink.textContent?.split(/네이버|예약|쿠폰|톡톡/)[0]?.trim() || '';
             }
             if (!placeName || seenSet.has(placeName)) continue;
             seenSet.add(placeName);
 
-            // 광고 판별
             const isAd = !!(
               li.textContent?.includes('광고') &&
-              (li.querySelector('[class*="ad"]') || li.querySelector('[class*="Ad"]') ||
-               li.textContent?.match(/^.*광고/) )
+              (li.querySelector('[class*="ad"]') || li.querySelector('[class*="Ad"]'))
             );
 
-            // placeId
             let placeId = null;
             const link = li.querySelector('a[href*="/hairshop/"], a[href*="/hospital/"], a[href*="/place/"], a[href*="/restaurant/"]');
             if (link) {
               const m = link.href.match(/\/(\d{5,})/);
               if (m) placeId = m[1];
             }
-
             results.push({ placeName, isAd, placeId });
           }
         }
@@ -276,21 +263,18 @@ async function crawlMobileList(keyword, options) {
 
       for (const item of items) {
         if (organicCount >= maxRank) break;
-
+        if (item.isAd) continue;
         const idKey = item.placeId || null;
         const nameKey = item.placeName;
         if ((idKey && seenIds.has(idKey)) || seenNames.has(nameKey)) continue;
         if (idKey) seenIds.add(idKey);
         seenNames.add(nameKey);
-
-        if (!item.isAd) {
-          organicCount++;
-          results.push({
-            rank: organicCount,
-            placeId: item.placeId || null,
-            placeName: item.placeName,
-          });
-        }
+        organicCount++;
+        results.push({
+          rank: organicCount,
+          placeId: item.placeId || null,
+          placeName: item.placeName,
+        });
       }
 
       return results;
@@ -307,7 +291,7 @@ async function crawlMobileList(keyword, options) {
           continue;
         }
       }
-      console.error(`[crawl-mobile] ${keyword} 실패:`, msg);
+      console.error(`[crawl-list] ${keyword} 실패:`, msg);
       return [];
     }
   }

@@ -10,13 +10,19 @@
 export function extractPlaceId(url) {
   if (!url) return null;
 
-  // https://map.naver.com/v5/entry/place/123456789
+  // 모든 네이버 플레이스 URL 형식 지원:
+  // https://map.naver.com/p/entry/place/123456789
   // https://map.naver.com/v5/search/.../place/123456789
-  // https://pcmap.place.naver.com/place/123456789
-  // https://m.place.naver.com/place/123456789
-  // https://m.place.naver.com/restaurant/123456789
-  const match = url.match(/\/(?:place|restaurant|cafe|hospital)\/(\d+)/);
+  // https://m.place.naver.com/restaurant/123456789/home
+  // https://m.place.naver.com/hairshop/123456789
+  // https://pcmap.place.naver.com/cafe/123456789
+  // 등 모든 카테고리 (place, restaurant, cafe, hairshop, hospital, accommodation, ...)
+  const match = url.match(/\/(?:place|restaurant|cafe|hairshop|hospital|accommodation|beauty|food|shopping|leisure|attraction|culture|parking|gasstation|pharmacy|school)\/(\d+)/);
   if (match) return match[1];
+
+  // 포괄적 폴백: naver.com URL에서 /카테고리/숫자 패턴
+  const fallbackMatch = url.match(/naver\.com\/\w+\/(\d{5,})/);
+  if (fallbackMatch) return fallbackMatch[1];
 
   // naver.me 단축 URL → 리다이렉트 필요
   if (url.includes('naver.me')) return null;
