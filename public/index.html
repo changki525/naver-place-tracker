@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>네이버 플레이스 순위 추적기</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%2303C75A'/><text x='16' y='23' text-anchor='middle' font-size='20' font-weight='900' fill='white' font-family='Arial'>N</text></svg>">
   <style>
     :root {
       --bg: #f5f6fa;
@@ -764,7 +765,15 @@
     try { return JSON.parse(localStorage.getItem(FAV_KEY)) || []; }
     catch { return []; }
   }
-  function saveFavorites(favs) { localStorage.setItem(FAV_KEY, JSON.stringify(favs)); }
+  function saveFavorites(favs) {
+    localStorage.setItem(FAV_KEY, JSON.stringify(favs));
+    // 서버에도 동기화 (자동 측정용)
+    fetch('/api/favorites', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(favs),
+    }).catch(() => {});
+  }
 
   function renderFavQuick() {
     const favs = loadFavorites();
@@ -892,6 +901,15 @@
     renderFavQuick();
     updateFavBtn();
     loadSearchVolumes();
+    // 페이지 로드 시 localStorage 즐겨찾기를 서버에 동기화
+    const favs = loadFavorites();
+    if (favs.length > 0) {
+      fetch('/api/favorites', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(favs),
+      }).catch(() => {});
+    }
   }
 
   async function loadHistoryData() {

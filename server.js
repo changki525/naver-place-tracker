@@ -70,6 +70,86 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // GET/POST /api/favorites — 서버 즐겨찾기 관리
+  if (path === '/api/favorites' && req.method === 'GET') {
+    try {
+      const history = await loadHistory();
+      sendJson(res, 200, history.favorites || []);
+    } catch (err) {
+      sendJson(res, 500, { error: err.message });
+    }
+    return;
+  }
+  if (path === '/api/favorites' && req.method === 'POST') {
+    try {
+      const favorites = await readBody(req);
+      const history = await loadHistory();
+      history.favorites = favorites;
+      history.lastUpdated = new Date().toISOString();
+      const { writeFile: wf, mkdir: mk } = await import('fs/promises');
+      const { resolve: rs, dirname: dn } = await import('path');
+      const dataDir = rs(dn(fileURLToPath(import.meta.url)), 'data');
+      await mk(dataDir, { recursive: true });
+      await wf(rs(dataDir, 'history.json'), JSON.stringify(history, null, 2), 'utf-8');
+      sendJson(res, 200, { success: true });
+    } catch (err) {
+      sendJson(res, 500, { error: err.message });
+    }
+    return;
+  }
+
+  // POST /api/auto-check-all — 즐겨찾기 업체 자동 순위 측정 (Cloud Scheduler 호출용)
+  if (path === '/api/auto-check-all' && req.method === 'POST') {
+    try {
+      const history = await loadHistory();
+      const favorites = history.favorites || [];
+      let checked = 0, failed = 0;
+
+      if (favorites.length === 0) {
+        console.log('[auto] 즐겨찾기가 비어있어 측정 건너뜀');
+        sendJson(res, 200, { success: true, checked: 0, failed: 0, message: '즐겨찾기 없음' });
+        return;
+      }
+
+      for (const fav of favorites) {
+        const placeUrl = fav.url;
+        const keywords = fav.keywords || [];
+        if (keywords.length === 0) continue;
+
+        // URL에서 placeId 추출
+        let placeId = extractPlaceId(placeUrl);
+        if (!placeId && /^\d+$/.test(placeUrl)) placeId = placeUrl;
+        if (!placeId) {
+          console.error(`[auto] ${fav.name}: placeId 추출 실패`);
+          failed += keywords.length;
+          continue;
+        }
+
+        const placeName = fav.name || placeId;
+
+        for (const keyword of keywords) {
+          try {
+            const crawlResults = await crawlNaverPlace(keyword, { maxRank: 200 });
+            const rankResult = parseRankFromResults(crawlResults, placeId, placeName);
+            await saveResult(placeId, rankResult.placeName || placeName, placeUrl, keyword, rankResult);
+            checked++;
+            console.log(`[auto] ${placeName} / ${keyword}: ${rankResult.rank ? rankResult.rank + '위' : '순위권 밖'}`);
+          } catch (err) {
+            failed++;
+            console.error(`[auto] ${placeName} / ${keyword} 실패:`, err.message);
+          }
+        }
+
+        await closeBrowser();
+      }
+
+      sendJson(res, 200, { success: true, checked, failed, total: favorites.length });
+    } catch (err) {
+      sendJson(res, 500, { error: err.message });
+    }
+    return;
+  }
+
   // GET /api/search-volume?keywords=키워드1,키워드2
   if (path === '/api/search-volume' && req.method === 'GET') {
     const kws = url.searchParams.get('keywords');
